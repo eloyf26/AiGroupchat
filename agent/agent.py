@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Stage 5 MVP: AI agent for AiGroupchat with configurable personalities
-Uses OpenAI for LLM and ElevenLabs for TTS
+Stage 7 MVP: AI agent for AiGroupchat with configurable personalities and RAG
+Uses OpenAI for LLM and ElevenLabs for TTS with document context retrieval
 """
 
 import json
 import logging
 import os
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+import httpx
 
 from dotenv import load_dotenv
 from livekit import agents
@@ -59,13 +60,78 @@ AGENT_TEMPLATES: Dict[str, Dict[str, Any]] = {
 }
 
 
+class DocumentContextManager:
+    """Manages document context retrieval from the backend API"""
+    def __init__(self, backend_url: str = "http://localhost:8000"):
+        self.backend_url = backend_url
+        self.client = httpx.AsyncClient(timeout=30.0)
+    
+    async def get_context(self, query: str, owner_id: str) -> Optional[str]:
+        """Get relevant document context for a query"""
+        try:
+            response = await self.client.post(
+                f"{self.backend_url}/api/documents/context",
+                json={
+                    "query": query,
+                    "owner_id": owner_id
+                }
+            )
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("context", "")
+            else:
+                logger.warning(f"Failed to get document context: {response.status_code}")
+                return None
+        except Exception as e:
+            logger.error(f"Error getting document context: {e}")
+            return None
+    
+    async def close(self):
+        await self.client.aclose()
+
+
 class ConfigurableAgent(Agent):
-    """Agent with configurable personality based on template"""
-    def __init__(self, agent_type: str) -> None:
+    """Agent with configurable personality based on template and RAG support"""
+    def __init__(self, agent_type: str, context_manager: Optional[DocumentContextManager] = None, owner_id: Optional[str] = None) -> None:
         template = AGENT_TEMPLATES.get(agent_type, AGENT_TEMPLATES["study_partner"])
-        super().__init__(instructions=template["instructions"])
+        
+        # Base instructions from template
+        base_instructions = template["instructions"]
+        
+        # Initialize with base instructions
+        super().__init__(instructions=base_instructions)
+        
         self.agent_type = agent_type
         self.template = template
+        self.context_manager = context_manager
+        self.owner_id = owner_id
+        self.base_instructions = base_instructions
+    
+    async def think(self, messages: list) -> str | None:
+        """Override think method to inject document context"""
+        # Get the last user message
+        if not messages or not self.context_manager or not self.owner_id:
+            return await super().think(messages)
+        
+        last_message = messages[-1]
+        if hasattr(last_message, 'content'):
+            # Get relevant document context
+            context = await self.context_manager.get_context(last_message.content, self.owner_id)
+            if context:
+                # Update instructions with context for this query
+                context_instructions = f"""{self.base_instructions}
+
+You have access to the following relevant information from the user's documents:
+
+{context}
+
+Please use this information to provide accurate and helpful responses when relevant."""
+                self._instructions = context_instructions
+            else:
+                # Reset to base instructions if no context
+                self._instructions = self.base_instructions
+        
+        return await super().think(messages)
 
 
 async def entrypoint(ctx: agents.JobContext):
@@ -73,14 +139,18 @@ async def entrypoint(ctx: agents.JobContext):
     
     logger.info(f"Agent starting for room: {ctx.room.name}")
     
-    # Get agent type from job metadata if available
+    # Get agent type and owner_id from job metadata if available
     agent_type = "study_partner"  # Default
+    owner_id = None
     if ctx.job and ctx.job.metadata:
         try:
             job_metadata = json.loads(ctx.job.metadata)
             if "agent_type" in job_metadata:
                 agent_type = job_metadata["agent_type"]
                 logger.info(f"Agent type from job metadata: {agent_type}")
+            if "owner_id" in job_metadata:
+                owner_id = job_metadata["owner_id"]
+                logger.info(f"Owner ID from job metadata: {owner_id}")
         except json.JSONDecodeError:
             logger.warning("Failed to parse job metadata")
     
@@ -94,12 +164,20 @@ async def entrypoint(ctx: agents.JobContext):
             if "agent_type" in room_metadata:
                 agent_type = room_metadata["agent_type"]
                 logger.info(f"Agent type from room metadata: {agent_type}")
+            if "owner_id" in room_metadata and not owner_id:
+                owner_id = room_metadata["owner_id"]
+                logger.info(f"Owner ID from room metadata: {owner_id}")
         except json.JSONDecodeError:
             logger.warning("Failed to parse room metadata")
     
     # Wait for the first participant to join and check their metadata as last resort
     participant = await ctx.wait_for_participant()
     logger.info(f"Participant joined: {participant.identity}")
+    
+    # Use participant identity as owner_id if not set
+    if not owner_id:
+        owner_id = participant.identity
+        logger.info(f"Using participant identity as owner_id: {owner_id}")
     
     if participant.metadata and agent_type == "study_partner":  # Only check if we haven't found agent type yet
         try:
@@ -114,6 +192,16 @@ async def entrypoint(ctx: agents.JobContext):
     template = AGENT_TEMPLATES.get(agent_type, AGENT_TEMPLATES["study_partner"])
     logger.info(f"Using agent template: {agent_type} ({template['name']})")
     
+    # Initialize document context manager for RAG
+    context_manager = DocumentContextManager()
+    
+    # Create the agent with context support
+    agent = ConfigurableAgent(
+        agent_type=agent_type,
+        context_manager=context_manager,
+        owner_id=owner_id
+    )
+    
     # Configure the voice pipeline with appropriate voice
     session = AgentSession(
         # Voice Activity Detection
@@ -125,7 +213,7 @@ async def entrypoint(ctx: agents.JobContext):
             language="en-US",
         ),
         
-        # Large Language Model
+        # Large Language Model with context injection
         llm=openai.LLM(
             model="gpt-4o-mini",
             temperature=0.8,
@@ -144,10 +232,12 @@ async def entrypoint(ctx: agents.JobContext):
         ),
     )
     
+    # We'll handle context injection in the agent's message processing
+    
     # Start the session with configured agent
     await session.start(
         room=ctx.room,
-        agent=ConfigurableAgent(agent_type),
+        agent=agent,
     )
     
     # Generate initial greeting based on agent type
@@ -155,7 +245,10 @@ async def entrypoint(ctx: agents.JobContext):
         instructions=template["greeting"]
     )
     
-    logger.info(f"Agent {template['name']} ready and listening")
+    logger.info(f"Agent {template['name']} ready and listening with RAG support")
+    
+    # The session will run until the participant leaves or the room is closed
+    # Context manager cleanup will happen when the agent worker shuts down
 
 
 if __name__ == "__main__":

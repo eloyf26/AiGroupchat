@@ -1,123 +1,224 @@
+"""
+Document Store for RAG (Retrieval-Augmented Generation)
+Handles document processing, embedding generation, and vector search using Supabase
+"""
+
 import os
-from typing import List, Dict, Optional
-from uuid import UUID
+import uuid
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+import tempfile
+import logging
+
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from langchain.schema import Document
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
 load_dotenv()
+logger = logging.getLogger(__name__)
+
 
 class DocumentStore:
     def __init__(self):
+        """Initialize DocumentStore with Supabase client and OpenAI embeddings"""
+        # Initialize Supabase client
         url = os.environ.get("SUPABASE_URL")
         key = os.environ.get("SUPABASE_KEY")
         if not url or not key:
-            raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set in environment variables")
+            raise ValueError("Missing SUPABASE_URL or SUPABASE_KEY environment variables")
         
         self.supabase: Client = create_client(url, key)
+        
+        # Initialize OpenAI embeddings (text-embedding-3-small)
+        openai_api_key = os.environ.get("OPENAI_API_KEY")
+        if not openai_api_key:
+            raise ValueError("Missing OPENAI_API_KEY environment variable")
+        
+        self.embeddings = OpenAIEmbeddings(
+            model="text-embedding-3-small",
+            openai_api_key=openai_api_key
+        )
+        
+        # Initialize text splitter (512 tokens per chunk as per plan)
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=512,
+            chunk_overlap=50,
+            length_function=len,
+            separators=["\n\n", "\n", " ", ""]
+        )
     
-    def set_user_context(self, user_id: str):
-        """Set the user context for RLS policies"""
-        # This would typically be done with a service role key and custom headers
-        # For MVP, we'll use a simplified approach
-        self.current_user_id = user_id
-    
-    async def create_document(self, owner_id: str, title: str, doc_type: str, metadata: Optional[Dict] = None) -> Dict:
-        """Create a new document"""
-        data = {
+    async def process_file(self, file_path: str, file_type: str, owner_id: str, title: str) -> str:
+        """
+        Process a file and store it in the database
+        
+        Args:
+            file_path: Path to the file to process
+            file_type: Type of file (pdf, txt)
+            owner_id: ID of the document owner
+            title: Title of the document
+            
+        Returns:
+            document_id: ID of the created document
+        """
+        # Load document based on file type
+        if file_type == "pdf":
+            loader = PyPDFLoader(file_path)
+        elif file_type in ["txt", "text"]:
+            loader = TextLoader(file_path)
+        else:
+            raise ValueError(f"Unsupported file type: {file_type}")
+        
+        documents = loader.load()
+        
+        # Split documents into chunks
+        chunks = self.text_splitter.split_documents(documents)
+        
+        # Create document record
+        doc_data = {
             "owner_id": owner_id,
             "title": title,
-            "type": doc_type,
-            "metadata": metadata or {}
+            "type": file_type,
+            "metadata": {
+                "chunk_count": len(chunks),
+                "source_file": os.path.basename(file_path)
+            }
         }
         
-        response = self.supabase.table("documents").insert(data).execute()
-        return response.data[0] if response.data else None
+        # Insert document
+        doc_response = self.supabase.table("documents").insert(doc_data).execute()
+        document_id = doc_response.data[0]["id"]
+        
+        # Process and store chunks with embeddings
+        for idx, chunk in enumerate(chunks):
+            # Generate embedding
+            embedding = self.embeddings.embed_query(chunk.page_content)
+            
+            # Prepare chunk data
+            chunk_data = {
+                "document_id": document_id,
+                "content": chunk.page_content,
+                "embedding": embedding,
+                "chunk_index": idx,
+                "metadata": {
+                    "page": chunk.metadata.get("page", None),
+                    "source": chunk.metadata.get("source", None)
+                }
+            }
+            
+            # Insert chunk
+            self.supabase.table("document_sections").insert(chunk_data).execute()
+        
+        return document_id
     
-    async def get_document(self, document_id: str, owner_id: str) -> Optional[Dict]:
-        """Get a document by ID"""
-        response = (
-            self.supabase.table("documents")
-            .select("*")
-            .eq("id", document_id)
-            .eq("owner_id", owner_id)
-            .single()
-            .execute()
-        )
+    async def search_documents(
+        self, 
+        query: str, 
+        owner_id: str, 
+        match_count: int = 5,
+        match_threshold: float = 0.7
+    ) -> List[Dict[str, Any]]:
+        """
+        Search for relevant document sections using semantic similarity
+        
+        Args:
+            query: Search query
+            owner_id: ID of the document owner
+            match_count: Number of results to return
+            match_threshold: Minimum similarity threshold
+            
+        Returns:
+            List of matching document sections with metadata
+        """
+        # Generate query embedding
+        query_embedding = self.embeddings.embed_query(query)
+        
+        # Call the search function
+        response = self.supabase.rpc(
+            "search_document_sections",
+            {
+                "query_embedding": query_embedding,
+                "owner_id": owner_id,
+                "match_count": match_count,
+                "match_threshold": match_threshold
+            }
+        ).execute()
+        
+        # Format results
+        results = []
+        for row in response.data:
+            # Get document info
+            doc_response = self.supabase.table("documents").select("*").eq("id", row["document_id"]).execute()
+            doc_info = doc_response.data[0] if doc_response.data else {}
+            
+            results.append({
+                "content": row["content"],
+                "similarity": row["similarity"],
+                "document_title": doc_info.get("title", "Unknown"),
+                "document_type": doc_info.get("type", "Unknown"),
+                "metadata": row.get("metadata", {})
+            })
+        
+        return results
+    
+    async def get_user_documents(self, owner_id: str) -> List[Dict[str, Any]]:
+        """Get all documents for a user"""
+        response = self.supabase.table("documents").select("*").eq("owner_id", owner_id).order("created_at", desc=True).execute()
         return response.data
     
-    async def list_documents(self, owner_id: str) -> List[Dict]:
-        """List all documents for a user"""
-        response = (
-            self.supabase.table("documents")
-            .select("*")
-            .eq("owner_id", owner_id)
-            .order("created_at", desc=True)
-            .execute()
-        )
+    async def get_document(self, document_id: str, owner_id: str) -> Optional[Dict[str, Any]]:
+        """Get a specific document by ID"""
+        response = self.supabase.table("documents").select("*").eq("id", document_id).eq("owner_id", owner_id).execute()
+        return response.data[0] if response.data else None
+    
+    async def get_document_sections(self, document_id: str) -> List[Dict[str, Any]]:
+        """Get all sections for a document"""
+        response = self.supabase.table("document_sections").select("*").eq("document_id", document_id).order("chunk_index").execute()
         return response.data
     
     async def delete_document(self, document_id: str, owner_id: str) -> bool:
         """Delete a document and all its sections"""
-        response = (
-            self.supabase.table("documents")
-            .delete()
-            .eq("id", document_id)
-            .eq("owner_id", owner_id)
-            .execute()
-        )
-        return len(response.data) > 0 if response.data else False
+        try:
+            self.supabase.table("documents").delete().eq("id", document_id).eq("owner_id", owner_id).execute()
+            return True
+        except Exception as e:
+            print(f"Error deleting document: {e}")
+            return False
     
-    async def add_document_section(
-        self, 
-        document_id: str, 
-        content: str, 
-        embedding: Optional[List[float]] = None,
-        chunk_index: int = 0,
-        metadata: Optional[Dict] = None
-    ) -> Dict:
-        """Add a section to a document"""
-        data = {
-            "document_id": document_id,
-            "content": content,
-            "chunk_index": chunk_index,
-            "metadata": metadata or {}
-        }
+    async def get_context_for_query(self, query: str, owner_id: str, max_tokens: int = 1500) -> str:
+        """
+        Get relevant context for a query to use in LLM prompts
         
-        if embedding:
-            data["embedding"] = embedding
+        Args:
+            query: The user's question
+            owner_id: ID of the document owner
+            max_tokens: Maximum tokens to include in context
+            
+        Returns:
+            Formatted context string
+        """
+        # Search for relevant documents
+        results = await self.search_documents(query, owner_id, match_count=5)
         
-        response = self.supabase.table("document_sections").insert(data).execute()
-        return response.data[0] if response.data else None
-    
-    async def search_similar_sections(
-        self, 
-        embedding: List[float], 
-        owner_id: str,
-        limit: int = 5,
-        threshold: float = 0.7
-    ) -> List[Dict]:
-        """Search for similar document sections using vector similarity"""
-        # Using RPC function for vector similarity search
-        # This assumes you've created a Postgres function for similarity search
-        response = self.supabase.rpc(
-            "search_document_sections",
-            {
-                "query_embedding": embedding,
-                "owner_id": owner_id,
-                "match_threshold": threshold,
-                "match_count": limit
-            }
-        ).execute()
+        if not results:
+            return ""
         
-        return response.data if response.data else []
-    
-    async def get_document_sections(self, document_id: str) -> List[Dict]:
-        """Get all sections for a document"""
-        response = (
-            self.supabase.table("document_sections")
-            .select("*")
-            .eq("document_id", document_id)
-            .order("chunk_index")
-            .execute()
-        )
-        return response.data
+        # Build context string
+        context_parts = []
+        total_length = 0
+        
+        for result in results:
+            # Format each result
+            part = f"[From: {result['document_title']}]\n{result['content']}\n"
+            part_length = len(part)
+            
+            # Check if adding this would exceed max tokens
+            if total_length + part_length > max_tokens:
+                break
+            
+            context_parts.append(part)
+            total_length += part_length
+        
+        return "\n---\n".join(context_parts)

@@ -147,6 +147,61 @@ ELEVEN_API_KEY=your-elevenlabs-api-key
 - Dynamic voice and personality switching
 - API endpoints for template discovery
 
+## Stage 7: Basic RAG with Document Upload ✅
+
+### Features Implemented
+- Document upload API endpoint (PDF and TXT support)
+- Automatic text chunking (512 tokens per chunk)
+- Vector embeddings using OpenAI text-embedding-3-small
+- Semantic similarity search using Supabase pgvector
+- Agent queries document context before responding
+- Row Level Security (RLS) for document access control
+
+### Technical Implementation
+
+#### Document Processing
+- **LangChain Integration**: Uses RecursiveCharacterTextSplitter for intelligent chunking
+- **Embedding Model**: OpenAI text-embedding-3-small (1536 dimensions)
+- **Vector Storage**: Supabase with pgvector extension
+- **Chunk Size**: 512 tokens with 50 token overlap
+
+#### API Endpoints
+```python
+# Upload document with automatic processing
+POST /api/documents
+  - Accepts: PDF, TXT files
+  - Returns: document_id, chunk_count
+
+# Search documents semantically
+POST /api/documents/search
+  - Input: query, owner_id
+  - Returns: relevant chunks with similarity scores
+
+# Get context for agent
+POST /api/documents/context
+  - Input: query, owner_id
+  - Returns: formatted context for LLM
+```
+
+#### Agent RAG Integration
+- Agent fetches relevant context before responding
+- Context injected as system message to LLM
+- Maintains conversation flow while adding accuracy
+- Owner ID tracked to ensure document privacy
+
+### Database Schema
+- **documents**: Stores document metadata
+- **document_sections**: Stores chunks with embeddings
+- **search_document_sections**: PostgreSQL function for vector similarity
+
+### Required Environment Variables
+Add to `backend/.env`:
+```
+SUPABASE_URL=your-supabase-project-url
+SUPABASE_KEY=your-supabase-service-role-key
+OPENAI_API_KEY=your-openai-api-key
+```
+
 ## Quick Start
 
 ### Prerequisites
@@ -156,6 +211,7 @@ ELEVEN_API_KEY=your-elevenlabs-api-key
 - OpenAI API key (for Stage 3+)
 - Deepgram API key (for Stage 3+)
 - ElevenLabs API key (for Stage 4+)
+- Supabase project with pgvector (for Stage 7+)
 
 ### Running the Application
 
@@ -208,6 +264,12 @@ ELEVEN_API_KEY=your-elevenlabs-api-key
    ./test-stage5.sh
    ```
 
+9. **Test Stage 7 (RAG with Document Upload)**:
+   ```bash
+   # Ensure Supabase and OpenAI keys are configured
+   ./test-stage7.sh
+   ```
+
 ### Development Commands
 
 See [CLAUDE.md](./CLAUDE.md) for complete development commands.
@@ -236,8 +298,9 @@ See [CLAUDE.md](./CLAUDE.md) for complete development commands.
 ├── test-stage3.sh            # Stage 3 test script
 ├── test-stage4.sh            # Stage 4 test script
 ├── test-stage5.sh            # Stage 5 test script
+├── test-stage7.sh            # Stage 7 test script
 ├── CLAUDE.md                 # Development guidance
-└── MVP-implementation-plan.md # 5-stage implementation plan
+└── MVP-implementation-plan.md # Implementation plan
 ```
 
 ## Completed Stages
@@ -247,29 +310,15 @@ See [CLAUDE.md](./CLAUDE.md) for complete development commands.
 - ✅ Stage 3: Single AI Agent implementation
 - ✅ Stage 4: ElevenLabs voice integration
 - ✅ Stage 5: Basic agent configuration UI
+- ✅ Stage 7: Basic RAG with Document Upload
 
-All MVP stages are now complete! The application supports voice conversations with configurable AI agents.
+The application now supports voice conversations with configurable AI agents that can reference uploaded documents!
 
-## Planned Stages (RAG Implementation)
+## Planned Stages (RAG Enhancement)
 
-- ⏳ Stage 6: Supabase Vector Database Setup
-- ⏳ Stage 7: Basic RAG with Document Upload
 - ⏳ Stage 8: Hybrid Search Implementation
 - ⏳ Stage 9: Advanced Chunking & Reranking
 - ⏳ Stage 10: Contextual Retrieval
-
-### Stage 6: Supabase Vector Database Setup (Planned)
-- Install Supabase client and set up pgvector extension
-- Create schema: `documents` table (id, owner_id, title, type, metadata) and `document_sections` table (id, document_id, content, embedding vector(1536), metadata)
-- Implement RLS policies for document access control
-- Add file upload endpoint to backend API
-
-### Stage 7: Basic RAG Implementation (Planned)
-- Add document processing: PDF parsing (pypdf2), text extraction, basic fixed-size chunking (512 tokens)
-- Generate embeddings using OpenAI's text-embedding-3-small model
-- Store chunks with embeddings in Supabase
-- Implement basic semantic search endpoint using cosine similarity
-- Update agent to query document context before responding
 
 ### Stage 8: Hybrid Search Implementation (Planned)
 - Add BM25 index using rank-bm25 library for keyword search

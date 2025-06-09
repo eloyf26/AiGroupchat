@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { VoiceRoom } from "./components/VoiceRoom";
+import { DocumentManager } from "./components/DocumentManager";
 
 interface AgentTemplate {
   name: string;
@@ -146,6 +147,11 @@ export default function Home() {
               Join Room
             </button>
           </div>
+          
+          {/* Document Manager - Show after name is entered */}
+          {participantName.trim() && backendStatus === "Connected" && (
+            <DocumentManager participantName={participantName} />
+          )}
         </div>
       ) : (
         <div style={{ marginTop: "2rem" }}>

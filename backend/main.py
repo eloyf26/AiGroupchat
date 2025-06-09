@@ -6,6 +6,8 @@ import os
 import json
 import asyncio
 import logging
+import tempfile
+import shutil
 from dotenv import load_dotenv
 from typing import Optional, List
 from uuid import UUID
@@ -84,7 +86,7 @@ async def generate_token(request: TokenRequest):
             }
             token.with_metadata(json.dumps(metadata))
             
-            # Create room with metadata to pass agent type
+            # Create room with metadata to pass agent type and owner_id
             try:
                 livekit_api = api.LiveKitAPI(
                     url=os.getenv("LIVEKIT_URL", "ws://localhost:7880"),
@@ -92,7 +94,8 @@ async def generate_token(request: TokenRequest):
                     api_secret=api_secret
                 )
                 room_metadata = {
-                    "agent_type": request.agent_type
+                    "agent_type": request.agent_type,
+                    "owner_id": request.participant_name
                 }
                 # Create or update room with metadata
                 await livekit_api.room.create_room(
@@ -169,42 +172,54 @@ async def upload_document(
     file: UploadFile = File(...),
     title: str = Form(...),
     owner_id: str = Form(...),
-    doc_type: str = Form("text")
 ):
-    """Upload a new document"""
+    """Upload and process a document with embeddings for Stage 7"""
     try:
-        # Create document record
-        document = await document_store.create_document(
-            owner_id=owner_id,
-            title=title,
-            doc_type=doc_type,
-            metadata={
-                "filename": file.filename,
-                "content_type": file.content_type,
-                "size": file.size
+        # Determine file type from extension
+        filename = file.filename.lower()
+        if filename.endswith('.pdf'):
+            file_type = "pdf"
+        elif filename.endswith(('.txt', '.text')):
+            file_type = "text"
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported file type. Only PDF and TXT files are supported."
+            )
+        
+        # Save uploaded file to temporary location
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as tmp_file:
+            content = await file.read()
+            tmp_file.write(content)
+            tmp_file_path = tmp_file.name
+        
+        try:
+            # Process file with embeddings
+            document_id = await document_store.process_file(
+                file_path=tmp_file_path,
+                file_type=file_type,
+                owner_id=owner_id,
+                title=title
+            )
+            
+            # Get document info to return
+            doc_response = document_store.supabase.table("documents").select("*").eq("id", document_id).execute()
+            document = doc_response.data[0] if doc_response.data else None
+            
+            return {
+                "document_id": document_id,
+                "title": document["title"],
+                "type": document["type"],
+                "chunk_count": document["metadata"].get("chunk_count", 0),
+                "created_at": document["created_at"]
             }
-        )
+            
+        finally:
+            # Clean up temporary file
+            os.unlink(tmp_file_path)
         
-        # For now, just store the raw content
-        # In Stage 7, we'll add chunking and embedding generation
-        content = await file.read()
-        content_text = content.decode('utf-8') if doc_type == "text" else str(content)
-        
-        # Add as a single section for now
-        await document_store.add_document_section(
-            document_id=document["id"],
-            content=content_text,
-            chunk_index=0,
-            metadata={"type": "full_document"}
-        )
-        
-        return {
-            "document_id": document["id"],
-            "title": document["title"],
-            "type": document["type"],
-            "created_at": document["created_at"]
-        }
-        
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Document upload error: {str(e)}")
         raise HTTPException(
@@ -217,7 +232,7 @@ async def upload_document(
 async def list_documents(owner_id: str):
     """List all documents for a user"""
     try:
-        documents = await document_store.list_documents(owner_id)
+        documents = await document_store.get_user_documents(owner_id)
         return documents
     except Exception as e:
         logger.error(f"Document listing error: {str(e)}")
@@ -268,4 +283,60 @@ async def delete_document(document_id: str, owner_id: str):
         raise HTTPException(
             status_code=500,
             detail=f"Failed to delete document: {str(e)}"
+        )
+
+
+class SearchRequest(BaseModel):
+    query: str
+    owner_id: str
+    max_results: int = 5
+    similarity_threshold: float = 0.7
+
+
+@app.post("/api/documents/search")
+async def search_documents(request: SearchRequest):
+    """Search documents using semantic similarity for Stage 7"""
+    try:
+        results = await document_store.search_documents(
+            query=request.query,
+            owner_id=request.owner_id,
+            match_count=request.max_results,
+            match_threshold=request.similarity_threshold
+        )
+        
+        return {
+            "query": request.query,
+            "results": results,
+            "count": len(results)
+        }
+        
+    except Exception as e:
+        logger.error(f"Document search error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to search documents: {str(e)}"
+        )
+
+
+@app.post("/api/documents/context")
+async def get_document_context(request: SearchRequest):
+    """Get relevant context for a query to use in AI agent responses"""
+    try:
+        context = await document_store.get_context_for_query(
+            query=request.query,
+            owner_id=request.owner_id,
+            max_tokens=1500
+        )
+        
+        return {
+            "query": request.query,
+            "context": context,
+            "has_context": bool(context)
+        }
+        
+    except Exception as e:
+        logger.error(f"Context retrieval error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get document context: {str(e)}"
         )
