@@ -40,8 +40,8 @@ ai-group-call-mvp/
 - **Stage 3**: ✅ Single AI agent (completed)
 - **Stage 4**: ✅ ElevenLabs integration (completed)
 - **Stage 5**: ✅ Agent configuration UI (completed)
-- **Stage 6**: ⏳ Supabase Vector Database Setup (planned)
-- **Stage 7**: ⏳ Basic RAG with Document Upload (planned)
+- **Stage 6**: ✅ Supabase Vector Database Setup (completed)
+- **Stage 7**: ✅ Basic RAG with Document Upload (completed)
 - **Stage 8**: ⏳ Hybrid Search Implementation (planned)
 - **Stage 9**: ⏳ Advanced Chunking & Reranking (planned)
 - **Stage 10**: ⏳ Contextual Retrieval (planned)
@@ -53,8 +53,8 @@ ai-group-call-mvp/
 3. **LiveKit Infrastructure**: Provides real-time communication via WebRTC and agent orchestration
 4. **Voice Synthesis**: ElevenLabs for high-quality, low-latency voice generation
 5. **LLM Integration**: OpenAI/Anthropic for agent intelligence and personality
-6. **Vector Database (Planned)**: Supabase with pgvector for document storage and similarity search
-7. **RAG System (Planned)**: LangChain for document processing and retrieval orchestration
+6. **Vector Database**: Supabase with pgvector for document storage and similarity search
+7. **RAG System**: LangChain for document processing and retrieval orchestration
 
 ## Technology Stack
 
@@ -68,11 +68,13 @@ ai-group-call-mvp/
 - **Deepgram**: Speech-to-text recognition
 - **Silero**: Voice activity detection
 
-### Planned RAG Technologies (Stages 6-10)
+### RAG Technologies (Stages 6-7 Completed)
 - **Supabase**: PostgreSQL database with pgvector extension for vector storage
 - **LangChain**: RAG orchestration and document processing framework
 - **OpenAI Embeddings**: text-embedding-3-small for vector generation
 - **pypdf2**: PDF document parsing
+
+### Planned Advanced RAG Technologies (Stages 8-10)
 - **rank-bm25**: BM25 keyword search implementation
 - **sentence-transformers**: Semantic chunking and reranking models
 
@@ -111,6 +113,12 @@ ai-group-call-mvp/
   - Response: `{ "token": string, "url": string, "ai_agent_enabled": boolean, "agent_type": string }`
 - `GET /api/agent-templates` - Get available agent templates
 - `GET /api/agent-templates/{template_type}` - Get specific agent template details
+- `GET /api/documents?owner_id={owner_id}` - Get documents for a specific owner
+- `POST /api/documents/context` - Retrieve relevant document context for RAG
+  - Request body: `{ "query": string, "owner_id": string }`
+  - Response: `{ "context": string, "has_context": boolean }`
+- `POST /api/documents/upload` - Upload and process documents for RAG
+- `POST /api/documents/search` - Search documents using semantic similarity
 
 ### Frontend Components
 - `page.tsx` - Main page with room join form and agent selection
@@ -147,8 +155,10 @@ ELEVEN_API_KEY=your-elevenlabs-api-key
 
 ### Agent System
 - Agents are built on LiveKit's Agent Framework with voice capabilities
-- Each agent has a personality defined through prompts (no knowledge documents in MVP)
+- Each agent has a personality defined through prompts with RAG document access
 - Agents can interrupt and engage in natural turn-taking conversations
+- RAG integration using `on_user_turn_completed` method for context injection
+- Document context retrieved per-user from Supabase vector database
 - Currently supports only 1 AI agent per room (multi-agent planned for future)
 
 ### Real-time Communication
@@ -192,6 +202,11 @@ When implementing features, always refer to the provided documentation for best 
 - `python-dotenv==1.0.1` - Environment variable management
 - `fastapi` - Web framework
 - `uvicorn` - ASGI server
+- `supabase==2.10.0` - Supabase client for vector database
+- `langchain==0.3.14` - RAG orchestration framework
+- `langchain-openai==0.2.14` - OpenAI integration for embeddings
+- `pypdf2==3.0.1` - PDF document parsing
+- `openai==1.58.1` - OpenAI API client
 
 ### Frontend
 - `@livekit/components-react@^2.9.9` - LiveKit React components
@@ -203,27 +218,46 @@ When implementing features, always refer to the provided documentation for best 
 ### Agent
 - `livekit-agents[openai,silero,deepgram,elevenlabs]~=1.0` - LiveKit agent framework with plugins
 - `python-dotenv==1.0.1` - Environment variable management
+- `httpx==0.27.2` - HTTP client for RAG context retrieval
 
 ## Recent Changes
-- Fixed agent selection mechanism to properly use room metadata
-- Agent checks multiple sources in order: job metadata → room metadata → participant metadata
-- Backend creates rooms with metadata containing agent type
-- All 5 MVP stages are now complete and tested
+- **Completed RAG Implementation (Stages 6-7)**:
+  - Integrated Supabase vector database with pgvector extension
+  - Implemented document upload, processing, and embedding generation
+  - Added semantic search using OpenAI embeddings (text-embedding-3-small)
+  - Built RAG voice agent using LiveKit's `on_user_turn_completed` method
+  - Added document context retrieval API with configurable similarity thresholds
+  - Successfully tested voice queries with document context injection
 
-## Planned RAG Implementation (Stages 6-10)
+- **Agent System Improvements**:
+  - Fixed agent selection mechanism to properly use room metadata
+  - Agent checks multiple sources in order: job metadata → room metadata → participant metadata
+  - Backend creates rooms with metadata containing agent type
+  - All 7 MVP stages are now complete and tested
 
-### Stage 6: Supabase Vector Database Setup (Planned)
-- Install Supabase client and set up pgvector extension
-- Create schema: `documents` table (id, owner_id, title, type, metadata) and `document_sections` table (id, document_id, content, embedding vector(1536), metadata)
-- Implement Row Level Security (RLS) policies for document access control
-- Add file upload endpoint to backend API
+## RAG Implementation Details
 
-### Stage 7: Basic RAG Implementation (Planned)
-- Add document processing: PDF parsing (pypdf2), text extraction, basic fixed-size chunking (512 tokens)
-- Generate embeddings using OpenAI's text-embedding-3-small model
-- Store chunks with embeddings in Supabase
-- Implement basic semantic search endpoint using cosine similarity
-- Update agent to query document context before responding
+### Stage 6: Supabase Vector Database Setup (✅ Completed)
+- ✅ Installed Supabase client and set up pgvector extension
+- ✅ Created schema: `documents` table (id, owner_id, title, type, metadata) and `document_sections` table (id, document_id, content, embedding vector(1536), metadata)
+- ✅ Implemented Row Level Security (RLS) policies for document access control
+- ✅ Added file upload endpoint to backend API
+
+### Stage 7: Basic RAG Implementation (✅ Completed)
+- ✅ Added document processing: PDF parsing (pypdf2), text extraction, basic fixed-size chunking (512 tokens)
+- ✅ Generated embeddings using OpenAI's text-embedding-3-small model
+- ✅ Store chunks with embeddings in Supabase
+- ✅ Implemented basic semantic search endpoint using cosine similarity
+- ✅ Updated agent to query document context using `on_user_turn_completed` method
+
+### RAG Agent Implementation Details
+- **DocumentContextManager**: Handles HTTP requests to backend for context retrieval
+- **RAGVoiceAgent**: Extends LiveKit's Agent class with RAG capabilities
+- **Context Injection**: Uses `on_user_turn_completed` to inject document context as system messages
+- **Error Handling**: Robust timeout and error handling for document retrieval
+- **Voice Integration**: Seamless integration with existing voice agent personalities
+
+## Future RAG Enhancements (Stages 8-10)
 
 ### Stage 8: Hybrid Search Implementation (Planned)
 - Add BM25 index using rank-bm25 library for keyword search

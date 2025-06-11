@@ -118,7 +118,7 @@ class DocumentStore:
         query: str, 
         owner_id: str, 
         match_count: int = 5,
-        match_threshold: float = 0.7
+        match_threshold: float = 0.3
     ) -> List[Dict[str, Any]]:
         """
         Search for relevant document sections using semantic similarity

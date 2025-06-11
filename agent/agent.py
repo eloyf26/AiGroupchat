@@ -12,7 +12,7 @@ import httpx
 
 from dotenv import load_dotenv
 from livekit import agents
-from livekit.agents import Agent, AgentSession
+from livekit.agents import llm, Agent, AgentSession
 from livekit.plugins import deepgram, openai, silero, elevenlabs
 
 load_dotenv()
@@ -33,7 +33,7 @@ AGENT_TEMPLATES: Dict[str, Dict[str, Any]] = {
             "Always be encouraging and supportive."
         ),
         "voice_id": "nPczCjzI2devNBz1zQrb",  # Brian - warm, friendly male voice
-        "greeting": "Greet the user warmly as Alex and ask what subject they'd like to study today."
+        "greeting": "Hey there! I'm Alex, your AI study partner. What subject would you like to explore together today?"
     },
     "socratic_tutor": {
         "name": "Sophie",
@@ -64,11 +64,19 @@ class DocumentContextManager:
     """Manages document context retrieval from the backend API"""
     def __init__(self, backend_url: str = "http://localhost:8000"):
         self.backend_url = backend_url
-        self.client = httpx.AsyncClient(timeout=30.0)
+        self.client = httpx.AsyncClient(timeout=10.0)  # Longer timeout for RAG
     
     async def get_context(self, query: str, owner_id: str) -> Optional[str]:
         """Get relevant document context for a query"""
         try:
+            # Validate inputs
+            if not query or not isinstance(query, str):
+                logger.warning(f"Invalid query: {query}")
+                return None
+            if not owner_id or not isinstance(owner_id, str):
+                logger.warning(f"Invalid owner_id: {owner_id}")
+                return None
+                
             response = await self.client.post(
                 f"{self.backend_url}/api/documents/context",
                 json={
@@ -76,62 +84,97 @@ class DocumentContextManager:
                     "owner_id": owner_id
                 }
             )
+            logger.debug(f"Backend response status: {response.status_code}")
             if response.status_code == 200:
                 data = response.json()
-                return data.get("context", "")
+                context = data.get("context", "")
+                logger.debug(f"Retrieved context length: {len(context)} chars")
+                return context
+            elif response.status_code == 422:
+                logger.warning(f"Invalid request to document context API. Query: '{query}', Owner ID: '{owner_id}'")
+                logger.warning(f"Response: {response.text}")
+                return None
             else:
                 logger.warning(f"Failed to get document context: {response.status_code}")
+                logger.warning(f"Response: {response.text}")
                 return None
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout getting document context: {e}")
+            return None
+        except httpx.RequestError as e:
+            logger.error(f"Request error getting document context: {e}")
+            return None
         except Exception as e:
-            logger.error(f"Error getting document context: {e}")
+            logger.error(f"Unexpected error getting document context: {e}")
             return None
     
     async def close(self):
         await self.client.aclose()
 
 
-class ConfigurableAgent(Agent):
-    """Agent with configurable personality based on template and RAG support"""
-    def __init__(self, agent_type: str, context_manager: Optional[DocumentContextManager] = None, owner_id: Optional[str] = None) -> None:
-        template = AGENT_TEMPLATES.get(agent_type, AGENT_TEMPLATES["study_partner"])
-        
-        # Base instructions from template
-        base_instructions = template["instructions"]
-        
-        # Initialize with base instructions
-        super().__init__(instructions=base_instructions)
-        
-        self.agent_type = agent_type
-        self.template = template
-        self.context_manager = context_manager
-        self.owner_id = owner_id
-        self.base_instructions = base_instructions
+class RAGVoiceAgent(Agent):
+    """Voice agent with RAG support using pipeline nodes"""
     
-    async def think(self, messages: list) -> str | None:
-        """Override think method to inject document context"""
-        # Get the last user message
-        if not messages or not self.context_manager or not self.owner_id:
-            return await super().think(messages)
+    def __init__(self, instructions: str, context_manager: DocumentContextManager, owner_id: str):
+        super().__init__(instructions=instructions)
+        self._context_manager = context_manager
+        self._owner_id = owner_id
+        self._rag_enabled = True
+        logger.info(f"RAGVoiceAgent initialized with owner_id: {owner_id}")
+    
+    async def on_user_turn_completed(self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage) -> None:
+        """Called when user completes a turn - inject RAG context here"""
+        if not self._rag_enabled or not self._context_manager or not self._owner_id:
+            return
         
-        last_message = messages[-1]
-        if hasattr(last_message, 'content'):
-            # Get relevant document context
-            context = await self.context_manager.get_context(last_message.content, self.owner_id)
+        try:
+            # Get the user's message content
+            user_message = new_message.content
+            logger.debug(f"Processing user message: '{user_message}' (type: {type(user_message)})")
+            
+            if not user_message:
+                logger.debug("No user message content to process")
+                return
+            
+            # Handle list content (LiveKit sends content as a list)
+            if isinstance(user_message, list):
+                # Join all parts of the message
+                user_message = " ".join(str(part) for part in user_message)
+            elif not isinstance(user_message, str):
+                user_message = str(user_message)
+            
+            # Skip very short messages that might be partial
+            if len(user_message.strip()) < 3:
+                logger.debug(f"Skipping short message: '{user_message}'")
+                return
+            
+            # Retrieve relevant context
+            logger.info(f"Retrieving context for query: '{user_message}' with owner_id: '{self._owner_id}'")
+            context = await self._context_manager.get_context(user_message, self._owner_id)
+            
             if context:
-                # Update instructions with context for this query
-                context_instructions = f"""{self.base_instructions}
-
-You have access to the following relevant information from the user's documents:
+                # Add context as a system message to inform the LLM
+                context_message = f"""IMPORTANT: The user has documents stored in the system. Here is relevant information from their documents:
 
 {context}
 
-Please use this information to provide accurate and helpful responses when relevant."""
-                self._instructions = context_instructions
+You MUST use this information to answer the user's question. Be specific and reference the document content directly. If the user asks about AI agent personalities, list them exactly as shown in the document."""
+                turn_ctx.add_message(
+                    role="system",
+                    content=context_message
+                )
+                logger.info(f"RAG context injected into conversation: {context[:100]}...")
             else:
-                # Reset to base instructions if no context
-                self._instructions = self.base_instructions
-        
-        return await super().think(messages)
+                logger.debug("No relevant context found for user message")
+                # Still provide a helpful response even without context
+                turn_ctx.add_message(
+                    role="system",
+                    content="No specific document context was found for this query. Provide a helpful response based on your general knowledge."
+                )
+                
+        except Exception as e:
+            logger.error(f"Failed to inject RAG context: {e}")
+            # Continue without RAG context on error
 
 
 async def entrypoint(ctx: agents.JobContext):
@@ -195,60 +238,48 @@ async def entrypoint(ctx: agents.JobContext):
     # Initialize document context manager for RAG
     context_manager = DocumentContextManager()
     
-    # Create the agent with context support
-    agent = ConfigurableAgent(
-        agent_type=agent_type,
+    # Create the voice agent with RAG support
+    agent = RAGVoiceAgent(
+        instructions=template["instructions"],
         context_manager=context_manager,
         owner_id=owner_id
     )
     
-    # Configure the voice pipeline with appropriate voice
+    # Create AgentSession with speech components
     session = AgentSession(
-        # Voice Activity Detection
-        vad=silero.VAD.load(),
-        
-        # Speech-to-Text
         stt=deepgram.STT(
             model="nova-2",
             language="en-US",
         ),
-        
-        # Large Language Model with context injection
         llm=openai.LLM(
             model="gpt-4o-mini",
             temperature=0.8,
+            timeout=60.0,
         ),
-        
-        # Text-to-Speech using ElevenLabs with agent-specific voice
         tts=elevenlabs.TTS(
-            model="eleven_flash_v2_5",  # Flash model for lowest latency
-            voice_id=template["voice_id"],  # Voice based on agent type
+            model="eleven_flash_v2_5",
+            voice_id=template["voice_id"],
             language="en",
             voice_settings=elevenlabs.VoiceSettings(
-                stability=0.5,  # Balanced stability for natural conversation
-                similarity_boost=1.0,  # Maximum clarity
-                style=0.0,  # Natural speaking style
+                stability=0.5,
+                similarity_boost=1.0,
+                style=0.0,
             ),
         ),
+        vad=silero.VAD.load()
     )
     
-    # We'll handle context injection in the agent's message processing
+    # Start the session with the agent
+    await session.start(room=ctx.room, agent=agent)
     
-    # Start the session with configured agent
-    await session.start(
-        room=ctx.room,
-        agent=agent,
-    )
-    
-    # Generate initial greeting based on agent type
-    await session.generate_reply(
-        instructions=template["greeting"]
-    )
+    # Generate initial greeting
+    try:
+        await session.generate_reply(instructions=template["greeting"])
+        logger.info(f"Initial greeting sent: {template['greeting']}")
+    except Exception as e:
+        logger.error(f"Failed to send initial greeting: {e}")
     
     logger.info(f"Agent {template['name']} ready and listening with RAG support")
-    
-    # The session will run until the participant leaves or the room is closed
-    # Context manager cleanup will happen when the agent worker shuts down
 
 
 if __name__ == "__main__":

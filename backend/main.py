@@ -290,7 +290,7 @@ class SearchRequest(BaseModel):
     query: str
     owner_id: str
     max_results: int = 5
-    similarity_threshold: float = 0.7
+    similarity_threshold: float = 0.3
 
 
 @app.post("/api/documents/search")

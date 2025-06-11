@@ -1,340 +1,162 @@
 # AiGroupchat MVP
 
-AI-powered group voice chat application built with Next.js and FastAPI.
+AI-powered group voice chat application with RAG capabilities, built with Next.js, FastAPI, LiveKit, and Supabase.
 
-## Stage 1: Minimal Infrastructure ✅
+## 🎯 Current Status
+**7 out of 10 planned stages completed** - The application now supports voice conversations with AI agents that can reference uploaded documents in real-time!
 
-Current implementation includes:
-- Next.js frontend with single page
-- FastAPI backend with health endpoint
-- Basic connectivity between frontend and backend
-- In-memory storage (no database)
-- Local development only
+## ✅ Completed Features
 
-## Stage 2: LiveKit Voice Room ✅
+### Core Voice Chat (Stages 1-5)
+- **Next.js Frontend**: Agent selection and voice room UI
+- **FastAPI Backend**: Token generation and agent management
+- **LiveKit Integration**: Real-time voice communication
+- **AI Agents**: 3 configurable personalities (Alex, Sophie, Marcus)
+- **ElevenLabs Voice**: High-quality, low-latency speech synthesis
 
-### Features Implemented
-- LiveKit token generation endpoint in backend (`POST /api/token`)
-- Voice room UI component with join/leave functionality
-- Real-time voice communication between participants
-- Audio controls (mute/unmute)
-- Participant list display
+### RAG Capabilities (Stages 6-7)
+- **Document Upload**: PDF and text file processing
+- **Vector Database**: Supabase with pgvector for semantic search
+- **Smart Chunking**: 512-token chunks with overlap
+- **Context Injection**: AI agents reference uploaded documents during conversations
+- **Real-time Retrieval**: Document context fetched and injected seamlessly
 
-### Technical Implementation
-
-#### Backend API
-The token generation endpoint creates secure JWT tokens for LiveKit room access:
-```python
-# POST /api/token
-# Request: { "room_name": "string", "participant_name": "string" }
-# Response: { "token": "jwt_token", "url": "wss://..." }
-```
-
-#### Frontend Components
-- **VoiceRoom.tsx**: Main component using LiveKit React SDK
-  - Handles WebRTC connection management
-  - Audio track publishing/subscribing
-  - Participant state synchronization
-
-#### Key Technical Decisions
-1. **LiveKit Cloud**: Using managed service for faster MVP development
-2. **Server-side tokens**: API secrets never exposed to frontend
-3. **Audio-only**: Simplified implementation without video
-4. **Component architecture**: Single component with LiveKit hooks for simplicity
-
-## Stage 3: Single AI Agent ✅
-
-### Features Implemented
-- Python LiveKit agent with hardcoded "Alex" study partner personality
-- OpenAI integration for LLM responses (GPT-4o-mini)
-- OpenAI TTS for voice synthesis (not ElevenLabs yet)
-- Automatic agent joining when room is created
-- Visual distinction between AI and human participants
-
-### Technical Implementation
-
-#### Agent Architecture
-- **agent/agent.py**: LiveKit Python agent worker
-  - Uses Silero VAD for voice activity detection
-  - Deepgram for speech-to-text
-  - OpenAI for both LLM and TTS
-  - Fixed personality as friendly study partner
-
-#### Backend Updates
-- Modified token endpoint to support agent dispatch
-- Added `enable_ai_agent` flag (default: true)
-- Room metadata triggers agent to join automatically
-
-#### Frontend Updates
-- Enhanced participant display with AI/Human indicators
-- Shows speaking status for each participant
-- Different styling for AI agents (blue background)
-
-### Required API Keys
-Add these to `agent/.env`:
-```
-OPENAI_API_KEY=your-openai-api-key
-DEEPGRAM_API_KEY=your-deepgram-api-key
-```
-
-## Stage 4: ElevenLabs Voice Integration ✅
-
-### Features Implemented
-- Replaced OpenAI TTS with ElevenLabs streaming
-- Using "eleven_flash_v2_5" model for lowest latency
-- Selected "Brian" voice - warm, friendly male voice
-- Optimized voice settings for natural conversation
-- No voice customization UI (single voice only)
-
-### Technical Changes
-
-#### Voice Configuration
-```python
-tts=elevenlabs.TTS(
-    model="eleven_flash_v2_5",  # Flash model for lowest latency
-    voice_id="nPczCjzI2devNBz1zQrb",  # Brian voice
-    language="en",
-    voice_settings=elevenlabs.VoiceSettings(
-        stability=0.5,  # Natural variability
-        similarity_boost=1.0,  # Maximum clarity
-        style=0.0,  # Natural speaking style
-    ),
-)
-```
-
-#### Performance Optimizations
-- Flash v2.5 model: Fastest ElevenLabs model for real-time conversation
-- Streaming enabled by default for low latency
-- Optimized settings for conversational flow
-
-### Additional Required API Keys
-Add to `agent/.env`:
-```
-ELEVEN_API_KEY=your-elevenlabs-api-key
-```
-
-**Note**: The ElevenLabs plugin requires the environment variable `ELEVEN_API_KEY` (not `ELEVENLABS_API_KEY`).
-
-## Stage 5: Minimal Agent Configuration ✅
-
-### Features Implemented
-- 3 hardcoded agent templates with distinct personalities
-- Simple dropdown selection in UI
-- Agent personality switching via API
-- Each agent has unique voice and conversation style
-- No custom agent builder or knowledge documents
-
-### Agent Templates
-
-1. **Alex (Study Partner)**
-   - Voice: Brian (warm, friendly male)
-   - Style: Helps students understand complex topics
-   - Approach: Encouraging and supportive
-
-2. **Sophie (Socratic Tutor)**
-   - Voice: Sarah (clear, professional female)
-   - Style: Guides students to discover answers themselves
-   - Approach: Asks probing questions
-
-3. **Marcus (Debate Partner)**
-   - Voice: Josh (confident, articulate male)
-   - Style: Explores ideas through philosophical debate
-   - Approach: Presents thoughtful counterarguments
-
-### Technical Implementation
-- Agent templates defined in backend and agent code
-- Agent type passed via participant metadata
-- Dynamic voice and personality switching
-- API endpoints for template discovery
-
-## Stage 7: Basic RAG with Document Upload ✅
-
-### Features Implemented
-- Document upload API endpoint (PDF and TXT support)
-- Automatic text chunking (512 tokens per chunk)
-- Vector embeddings using OpenAI text-embedding-3-small
-- Semantic similarity search using Supabase pgvector
-- Agent queries document context before responding
-- Row Level Security (RLS) for document access control
-
-### Technical Implementation
-
-#### Document Processing
-- **LangChain Integration**: Uses RecursiveCharacterTextSplitter for intelligent chunking
-- **Embedding Model**: OpenAI text-embedding-3-small (1536 dimensions)
-- **Vector Storage**: Supabase with pgvector extension
-- **Chunk Size**: 512 tokens with 50 token overlap
-
-#### API Endpoints
-```python
-# Upload document with automatic processing
-POST /api/documents
-  - Accepts: PDF, TXT files
-  - Returns: document_id, chunk_count
-
-# Search documents semantically
-POST /api/documents/search
-  - Input: query, owner_id
-  - Returns: relevant chunks with similarity scores
-
-# Get context for agent
-POST /api/documents/context
-  - Input: query, owner_id
-  - Returns: formatted context for LLM
-```
-
-#### Agent RAG Integration
-- Agent fetches relevant context before responding
-- Context injected as system message to LLM
-- Maintains conversation flow while adding accuracy
-- Owner ID tracked to ensure document privacy
-
-### Database Schema
-- **documents**: Stores document metadata
-- **document_sections**: Stores chunks with embeddings
-- **search_document_sections**: PostgreSQL function for vector similarity
-
-### Required Environment Variables
-Add to `backend/.env`:
-```
-SUPABASE_URL=your-supabase-project-url
-SUPABASE_KEY=your-supabase-service-role-key
-OPENAI_API_KEY=your-openai-api-key
-```
-
-## Quick Start
+## 🔧 Quick Start
 
 ### Prerequisites
 - Node.js 18+
 - Python 3.12+
 - LiveKit API credentials (get from https://cloud.livekit.io)
-- OpenAI API key (for Stage 3+)
-- Deepgram API key (for Stage 3+)
-- ElevenLabs API key (for Stage 4+)
-- Supabase project with pgvector (for Stage 7+)
+- OpenAI API key
+- Deepgram API key  
+- ElevenLabs API key
+- Supabase project with pgvector extension
 
-### Running the Application
+### Setup
 
-1. **Configure LiveKit** (for Stage 2):
-   - Copy `backend/.env.example` to `backend/.env` (if exists) or create `backend/.env`
-   - Add your LiveKit credentials:
-     ```
-     LIVEKIT_API_KEY=your-api-key
-     LIVEKIT_API_SECRET=your-api-secret
-     LIVEKIT_URL=wss://your-project.livekit.cloud
-     ```
-
-2. **Start Backend**:
+1. **Configure Environment**:
    ```bash
-   cd backend && ./run.sh
+   # Backend
+   cp backend/.env.example backend/.env  # Add your API keys
+   
+   # Agent  
+   cp agent/.env.example agent/.env      # Add your API keys
    ```
-   Backend will run on http://localhost:8000
 
-3. **Start Frontend** (in another terminal):
+2. **Start Services**:
    ```bash
+   # Terminal 1: Backend
+   cd backend && ./run.sh
+   
+   # Terminal 2: Agent
+   cd agent && ./run.sh
+   
+   # Terminal 3: Frontend
    cd frontend && npm run dev
    ```
-   Frontend will run on http://localhost:3000
 
-4. **Test Stage 1 (Minimal Infrastructure)**:
-   ```bash
-   ./test-stage1.sh
-   ```
+3. **Test the Application**:
+   - Open http://localhost:3000
+   - Select an AI agent (Alex, Sophie, or Marcus)
+   - Join a voice room
+   - Upload documents via the backend API
+   - Have conversations where agents reference your documents!
 
-5. **Test Stage 2 (Voice Room)**:
-   ```bash
-   ./test-stage2.sh
-   ```
+## 🧪 Testing
 
-6. **Test Stage 3 (AI Agent)**:
-   ```bash
-   # First add API keys to agent/.env
-   ./test-stage3.sh
-   ```
-
-7. **Test Stage 4 (ElevenLabs Voice)**:
-   ```bash
-   # Ensure ELEVEN_API_KEY is added to agent/.env
-   ./test-stage4.sh
-   ```
-
-8. **Test Stage 5 (Agent Configuration)**:
-   ```bash
-   # All API keys should be configured
-   ./test-stage5.sh
-   ```
-
-9. **Test Stage 7 (RAG with Document Upload)**:
-   ```bash
-   # Ensure Supabase and OpenAI keys are configured
-   ./test-stage7.sh
-   ```
-
-### Development Commands
-
-See [CLAUDE.md](./CLAUDE.md) for complete development commands.
-
-## Project Structure
-
-```
-├── frontend/                    # Next.js application
-│   ├── app/
-│   │   ├── components/
-│   │   │   └── VoiceRoom.tsx   # LiveKit voice room component
-│   │   └── page.tsx            # Main page with room UI
-│   └── package.json            # Frontend dependencies
-├── backend/                    # FastAPI application
-│   ├── main.py                # API endpoints
-│   ├── requirements.txt       # Python dependencies
-│   └── .env                   # LiveKit credentials
-├── agent/                     # LiveKit Python agent (Stage 3)
-│   ├── agent.py              # AI agent implementation
-│   ├── requirements.txt      # Agent dependencies
-│   ├── run.sh               # Agent run script
-│   └── .env                 # Agent credentials
-├── documentation/             # Technical documentation
-├── test-stage1.sh            # Stage 1 test script
-├── test-stage2.sh            # Stage 2 test script
-├── test-stage3.sh            # Stage 3 test script
-├── test-stage4.sh            # Stage 4 test script
-├── test-stage5.sh            # Stage 5 test script
-├── test-stage7.sh            # Stage 7 test script
-├── CLAUDE.md                 # Development guidance
-└── MVP-implementation-plan.md # Implementation plan
+Run automated tests for each stage:
+```bash
+./test-stage1.sh  # Infrastructure
+./test-stage2.sh  # Voice rooms
+./test-stage3.sh  # AI agents
+./test-stage4.sh  # ElevenLabs voice
+./test-stage5.sh  # Agent configuration
+./test-stage6.sh  # Vector database
+./test-stage7.sh  # RAG implementation
 ```
 
-## Completed Stages
+## 🤖 AI Agent Personalities
 
-- ✅ Stage 1: Minimal Infrastructure
-- ✅ Stage 2: LiveKit Voice Room
-- ✅ Stage 3: Single AI Agent implementation
-- ✅ Stage 4: ElevenLabs voice integration
-- ✅ Stage 5: Basic agent configuration UI
-- ✅ Stage 7: Basic RAG with Document Upload
+### Alex (Study Partner)
+- **Voice**: Brian (warm, friendly male)
+- **Style**: Encouraging explanations and supportive guidance
+- **Best for**: Learning new concepts, homework help
 
-The application now supports voice conversations with configurable AI agents that can reference uploaded documents!
+### Sophie (Socratic Tutor)  
+- **Voice**: Sarah (clear, professional female)
+- **Style**: Guides discovery through thoughtful questions
+- **Best for**: Critical thinking, problem-solving
 
-## Planned Stages (RAG Enhancement)
+### Marcus (Debate Partner)
+- **Voice**: Josh (confident, articulate male)
+- **Style**: Philosophical discussions and counterarguments
+- **Best for**: Exploring complex ideas, developing arguments
 
-- ⏳ Stage 8: Hybrid Search Implementation
-- ⏳ Stage 9: Advanced Chunking & Reranking
-- ⏳ Stage 10: Contextual Retrieval
+## 📄 Document-Aware Conversations
 
-### Stage 8: Hybrid Search Implementation (Planned)
-- Add BM25 index using rank-bm25 library for keyword search
-- Implement Reciprocal Rank Fusion (RRF) to combine vector and keyword results
-- Create hybrid search endpoint that merges both search types
-- Add search configuration options (weights for semantic vs keyword)
+Upload documents via the API and watch as agents reference them during conversations:
 
-### Stage 9: Advanced Chunking & Reranking (Planned)
-- Implement semantic chunking using sentence-transformers
-- Add proposition-based chunking for factual content
-- Integrate reranking model (ms-marco-MiniLM or BGE reranker)
-- Implement dynamic chunk size selection based on content type
+```bash
+# Upload a document
+curl -X POST http://localhost:8000/api/documents \
+  -F "file=@your-document.pdf" \
+  -F "owner_id=your-name"
 
-### Stage 10: Contextual Retrieval (Planned)
-- Generate contextual chunk headers using LLM summarization
-- Prepend context to chunks before embedding
-- Implement contextual BM25 with enriched metadata
-- Add document-level summaries for better context understanding
-- Follow Anthropic's contextual retrieval approach
+# Then ask questions about it in voice chat!
+# "What did the document say about X?"
+# "Can you summarize the main points?"
+```
+
+## 📁 Project Structure
+
+```
+├── frontend/                 # Next.js application
+│   ├── app/components/       # React components
+│   │   └── VoiceRoom.tsx    # LiveKit voice room component
+│   └── app/page.tsx         # Main page with agent selection
+├── backend/                 # FastAPI application  
+│   ├── main.py             # API endpoints
+│   ├── document_store.py   # RAG document processing
+│   └── agent_templates.py  # Agent personality definitions
+├── agent/                  # LiveKit Python agent
+│   └── agent.py           # RAG-enabled voice agent
+├── documentation/          # Technical guides
+├── test-stage*.sh         # Automated test scripts
+└── MVP-IMPLEMENTATION.md  # Complete implementation guide
+```
+
+## 📚 Documentation
+
+- **[MVP-IMPLEMENTATION.md](./MVP-IMPLEMENTATION.md)**: Complete implementation guide with all stages
+- **[CLAUDE.md](./CLAUDE.md)**: Development guidance and commands
+- **[documentation/](./documentation/)**: Technical guides for LiveKit, ElevenLabs, etc.
+
+## 🚀 Current Capabilities
+
+✅ **7 out of 10 stages complete**
+- Real-time voice communication
+- 3 AI agent personalities  
+- Document upload and processing
+- Semantic search and retrieval
+- Context-aware AI responses
+
+## 🔮 Planned Enhancements (Stages 8-10)
+
+### Stage 8: Hybrid Search
+- BM25 keyword search + vector similarity
+- Reciprocal Rank Fusion (RRF) 
+- Configurable search weights
+
+### Stage 9: Advanced Processing
+- Semantic chunking strategies
+- Reranking models integration
+- Dynamic chunk sizing
+
+### Stage 10: Contextual Retrieval  
+- LLM-generated context headers
+- Enhanced metadata enrichment
+- Document-level summaries
+
+---
+
+**Ready to explore AI-powered voice conversations with document awareness? Get started with the Quick Start guide above!** 🎤✨
