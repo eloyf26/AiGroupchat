@@ -24,6 +24,9 @@ from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
 
+# Contextual retrieval import
+from contextual_processor import ContextualProcessor
+
 load_dotenv()
 logger = logging.getLogger(__name__)
 
@@ -49,10 +52,10 @@ class DocumentStore:
             openai_api_key=openai_api_key
         )
         
-        # Initialize text splitter (512 tokens per chunk as per plan)
+        # Initialize text splitter (800 tokens per chunk as per Anthropic recommendation)
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=512,
-            chunk_overlap=50,
+            chunk_size=800,  # Official Anthropic recommendation for contextual retrieval
+            chunk_overlap=80,  # 10% overlap as recommended
             length_function=len,
             separators=["\n\n", "\n", " ", ""]
         )
@@ -69,10 +72,18 @@ class DocumentStore:
         self._doc_metadata_cache = {}  # Document metadata cache with TTL
         self._bm25_indexes = {}  # Pre-built BM25 indexes per user
         self._reranker = None  # Will be loaded by startup event if enabled
+        
+        # Contextual processing
+        try:
+            self._contextual_processor = ContextualProcessor()
+            logger.info(f"🧠 [CONTEXTUAL] Processor initialized: {self._contextual_processor.enabled}")
+        except Exception as e:
+            logger.warning(f"🧠 [CONTEXTUAL] Failed to initialize: {e}")
+            self._contextual_processor = None
     
     async def process_file(self, file_path: str, file_type: str, owner_id: str, title: str) -> str:
         """
-        Process a file and store it in the database
+        Process a file and store it in the database with optional contextual enhancement
         
         Args:
             file_path: Path to the file to process
@@ -83,6 +94,8 @@ class DocumentStore:
         Returns:
             document_id: ID of the created document
         """
+        logger.info(f"📄 [PROCESSING] Starting file: {title} ({file_type})")
+        
         # Load document based on file type
         if file_type == "pdf":
             loader = PyPDFLoader(file_path)
@@ -92,18 +105,71 @@ class DocumentStore:
             raise ValueError(f"Unsupported file type: {file_type}")
         
         documents = loader.load()
+        full_document_text = "\n\n".join([doc.page_content for doc in documents])
         
         # Split documents into chunks
         chunks = self.text_splitter.split_documents(documents)
+        chunk_contents = [chunk.page_content for chunk in chunks]
         
-        # Create document record
+        logger.info(f"📄 [PROCESSING] Split into {len(chunks)} chunks")
+        
+        # Process chunks with contextual enhancement if available
+        processed_chunks = []
+        contextual_stats = {
+            "total_chunks": len(chunks),
+            "processed_chunks": 0,
+            "failed_chunks": 0,
+            "total_tokens_used": 0,
+            "processing_time_seconds": 0,
+            "cost_estimate_usd": 0
+        }
+        
+        if self._contextual_processor and self._contextual_processor.enabled:
+            try:
+                start_time = time.time()
+                logger.info(f"🧠 [CONTEXTUAL] Starting enhancement for {len(chunks)} chunks")
+                
+                def progress_callback(current: int, total: int):
+                    logger.info(f"🧠 [CONTEXTUAL] Progress: {current}/{total} chunks processed")
+                
+                processed_chunks = await self._contextual_processor.process_document_chunks(
+                    chunk_contents,
+                    full_document_text,
+                    title,
+                    progress_callback
+                )
+                
+                processing_time = time.time() - start_time
+                contextual_stats["processing_time_seconds"] = processing_time
+                contextual_stats["processed_chunks"] = sum(1 for c in processed_chunks if c["is_contextualized"])
+                contextual_stats["failed_chunks"] = len(chunks) - contextual_stats["processed_chunks"]
+                
+                # Estimate cost (rough calculation: ~$1.02 per million tokens)
+                estimated_tokens = self._contextual_processor._estimate_tokens(full_document_text) * len(chunks)
+                contextual_stats["total_tokens_used"] = estimated_tokens
+                contextual_stats["cost_estimate_usd"] = (estimated_tokens / 1_000_000) * 1.02
+                
+                logger.info(f"🧠 [CONTEXTUAL] Enhanced {contextual_stats['processed_chunks']}/{len(chunks)} chunks in {processing_time:.2f}s")
+                
+            except Exception as e:
+                logger.error(f"🧠 [CONTEXTUAL] Enhancement failed: {e}")
+                # Fall back to original chunks without context
+                processed_chunks = [{"content": content, "contextual_content": None, "is_contextualized": False} 
+                                 for content in chunk_contents]
+        else:
+            # No contextual processing available
+            processed_chunks = [{"content": content, "contextual_content": None, "is_contextualized": False} 
+                             for content in chunk_contents]
+        
+        # Create document record with enhanced metadata
         doc_data = {
             "owner_id": owner_id,
             "title": title,
             "type": file_type,
             "metadata": {
                 "chunk_count": len(chunks),
-                "source_file": os.path.basename(file_path)
+                "source_file": os.path.basename(file_path),
+                "contextual_processing": contextual_stats
             }
         }
         
@@ -114,29 +180,55 @@ class DocumentStore:
         # Cache document metadata immediately
         self._cache_document_metadata(document_id, doc_response.data[0])
         
-        # Process and store chunks with embeddings
-        for idx, chunk in enumerate(chunks):
-            # Generate embedding
-            embedding = self.embeddings.embed_query(chunk.page_content)
+        # Process and store chunks with embeddings and contextual content
+        for idx, (original_chunk, processed_chunk) in enumerate(zip(chunks, processed_chunks)):
+            # Determine content to embed (use contextual if available)
+            content_to_embed = processed_chunk["content"]
+            if processed_chunk["contextual_content"]:
+                # Prepend context to chunk for embedding
+                content_to_embed = f"{processed_chunk['contextual_content']}\n\n{processed_chunk['content']}"
+            
+            # Generate embedding using the contextualized content
+            embedding = self.embeddings.embed_query(content_to_embed)
             
             # Prepare chunk data
             chunk_data = {
                 "document_id": document_id,
-                "content": chunk.page_content,
+                "content": processed_chunk["content"],
+                "contextual_content": processed_chunk["contextual_content"],
+                "is_contextualized": processed_chunk["is_contextualized"],
                 "embedding": embedding,
                 "chunk_index": idx,
                 "metadata": {
-                    "page": chunk.metadata.get("page", None),
-                    "source": chunk.metadata.get("source", None)
+                    "page": original_chunk.metadata.get("page", None),
+                    "source": original_chunk.metadata.get("source", None)
+                },
+                "contextual_metadata": {
+                    "content_length": len(processed_chunk["content"]),
+                    "contextual_length": len(processed_chunk["contextual_content"]) if processed_chunk["contextual_content"] else 0,
+                    "embedded_with_context": processed_chunk["is_contextualized"]
                 }
             }
             
             # Insert chunk
             self.supabase.table("document_sections").insert(chunk_data).execute()
         
+        # Store contextual processing statistics
+        if contextual_stats["processed_chunks"] > 0 or contextual_stats["failed_chunks"] > 0:
+            stats_data = {
+                "document_id": document_id,
+                "owner_id": owner_id,
+                **contextual_stats
+            }
+            try:
+                self.supabase.table("contextual_processing_stats").insert(stats_data).execute()
+            except Exception as e:
+                logger.warning(f"Failed to store contextual stats: {e}")
+        
         # Build BM25 index immediately in background
         await self._rebuild_bm25_index(owner_id)
         
+        logger.info(f"✅ [PROCESSING] Completed: {title} (ID: {document_id})")
         return document_id
     
     async def search_documents(
@@ -377,18 +469,18 @@ class DocumentStore:
         return self._bm25_indexes.get(owner_id)
     
     def _build_bm25_index(self, owner_id: str):
-        """Build BM25 index for user's documents"""
+        """Build BM25 index for user's documents using contextual content when available"""
         try:
-            # Try to use the new function first, fallback to manual query
+            # Try to use the new contextual function first, fallback to manual query
             try:
                 response = self.supabase.rpc(
-                    "get_user_document_sections",
-                    {"user_id": owner_id}
+                    "get_user_document_sections_contextual",
+                    {"user_id": owner_id, "prefer_contextual": True}
                 ).execute()
             except Exception:
                 # Fallback: manual query if function doesn't exist
                 response = self.supabase.table("document_sections").select(
-                    "id, document_id, content, chunk_index, documents!inner(owner_id)"
+                    "id, document_id, content, contextual_content, is_contextualized, chunk_index, documents!inner(owner_id)"
                 ).eq("documents.owner_id", owner_id).order("document_id, chunk_index").execute()
                 
                 # Reformat to match expected structure
@@ -398,6 +490,8 @@ class DocumentStore:
                         formatted_data.append({
                             'id': item['id'],
                             'content': item['content'],
+                            'contextual_content': item.get('contextual_content'),
+                            'is_contextualized': item.get('is_contextualized', False),
                             'document_id': item['document_id'],
                             'chunk_index': item['chunk_index']
                         })
@@ -406,17 +500,25 @@ class DocumentStore:
             if not response.data:
                 return
             
-            # Prepare tokenized corpus
+            # Prepare tokenized corpus using contextual content when available
             corpus = []
             doc_mapping = []
             
             for section in response.data:
+                # Use contextual content for BM25 if available, otherwise use original content
+                content_for_search = section['content']
+                if section.get('is_contextualized') and section.get('contextual_content'):
+                    # Combine contextual information with original content for better keyword matching
+                    content_for_search = f"{section['contextual_content']} {section['content']}"
+                
                 # Simple tokenization
-                tokens = section['content'].lower().split()
+                tokens = content_for_search.lower().split()
                 corpus.append(tokens)
                 doc_mapping.append({
                     'id': section['id'],
                     'content': section['content'],
+                    'contextual_content': section.get('contextual_content'),
+                    'is_contextualized': section.get('is_contextualized', False),
                     'document_id': section['document_id']
                 })
             
@@ -426,6 +528,9 @@ class DocumentStore:
                 'index': bm25,
                 'docs': doc_mapping
             }
+            
+            contextual_count = sum(1 for doc in doc_mapping if doc['is_contextualized'])
+            logger.info(f"🔍 [BM25] Built index for {owner_id}: {len(doc_mapping)} chunks ({contextual_count} contextualized)")
             
         except Exception as e:
             logger.error(f"Error building BM25 index: {e}")
@@ -601,7 +706,147 @@ class DocumentStore:
                 "similarity": result["score"],
                 "document_title": doc_info.get("title", "Unknown"),
                 "document_type": doc_info.get("type", "Unknown"),
-                "metadata": {"bm25_score": result["score"]}
+                "metadata": {
+                    "bm25_score": result["score"],
+                    "is_contextualized": result.get("is_contextualized", False),
+                    "contextual_content": result.get("contextual_content")
+                }
             })
         
         return formatted_results
+    
+    async def get_contextual_processing_stats(self, owner_id: str, days_back: int = 30) -> Dict[str, Any]:
+        """Get contextual processing statistics for a user"""
+        try:
+            response = self.supabase.rpc(
+                "get_contextual_processing_stats",
+                {"user_id": owner_id, "days_back": days_back}
+            ).execute()
+            
+            if response.data and len(response.data) > 0:
+                stats = response.data[0]
+                return {
+                    "total_documents": stats.get("total_documents", 0),
+                    "total_chunks": stats.get("total_chunks", 0),
+                    "total_tokens": stats.get("total_tokens", 0),
+                    "estimated_cost_usd": float(stats.get("estimated_cost_usd", 0)),
+                    "days_back": days_back
+                }
+            else:
+                return {
+                    "total_documents": 0,
+                    "total_chunks": 0,
+                    "total_tokens": 0,
+                    "estimated_cost_usd": 0.0,
+                    "days_back": days_back
+                }
+        except Exception as e:
+            logger.error(f"Error fetching contextual stats: {e}")
+            return {
+                "total_documents": 0,
+                "total_chunks": 0,
+                "total_tokens": 0,
+                "estimated_cost_usd": 0.0,
+                "days_back": days_back,
+                "error": str(e)
+            }
+    
+    async def migrate_document_to_contextual(self, document_id: str, owner_id: str) -> Dict[str, Any]:
+        """
+        Migrate an existing document to use contextual retrieval
+        
+        Args:
+            document_id: ID of the document to migrate
+            owner_id: Owner of the document
+            
+        Returns:
+            Migration results
+        """
+        if not self._contextual_processor or not self._contextual_processor.enabled:
+            return {"success": False, "error": "Contextual processing not available"}
+        
+        try:
+            # Get document and its sections
+            doc_response = self.supabase.table("documents").select("*").eq("id", document_id).eq("owner_id", owner_id).execute()
+            if not doc_response.data:
+                return {"success": False, "error": "Document not found"}
+            
+            document = doc_response.data[0]
+            
+            # Get all sections for this document
+            sections_response = self.supabase.table("document_sections").select("*").eq("document_id", document_id).order("chunk_index").execute()
+            sections = sections_response.data
+            
+            if not sections:
+                return {"success": False, "error": "No sections found for document"}
+            
+            # Check if already contextualized
+            contextualized_count = sum(1 for s in sections if s.get("is_contextualized"))
+            if contextualized_count == len(sections):
+                return {"success": True, "message": "Document already fully contextualized", "sections_processed": 0}
+            
+            # Reconstruct full document from sections
+            full_document_text = "\n\n".join([section["content"] for section in sections])
+            chunk_contents = [section["content"] for section in sections]
+            
+            logger.info(f"🔄 [MIGRATION] Starting contextual migration for document: {document['title']}")
+            
+            # Process chunks with contextual enhancement
+            processed_chunks = await self._contextual_processor.process_document_chunks(
+                chunk_contents,
+                full_document_text,
+                document["title"]
+            )
+            
+            # Update sections with contextual content and re-embed
+            successful_updates = 0
+            for idx, (section, processed_chunk) in enumerate(zip(sections, processed_chunks)):
+                if processed_chunk["is_contextualized"]:
+                    # Create new embedding with contextual content
+                    content_to_embed = f"{processed_chunk['contextual_content']}\n\n{processed_chunk['content']}"
+                    new_embedding = self.embeddings.embed_query(content_to_embed)
+                    
+                    # Update the section
+                    update_data = {
+                        "contextual_content": processed_chunk["contextual_content"],
+                        "is_contextualized": True,
+                        "embedding": new_embedding,
+                        "contextual_metadata": {
+                            "migrated_at": datetime.now().isoformat(),
+                            "content_length": len(processed_chunk["content"]),
+                            "contextual_length": len(processed_chunk["contextual_content"]),
+                            "embedded_with_context": True
+                        }
+                    }
+                    
+                    self.supabase.table("document_sections").update(update_data).eq("id", section["id"]).execute()
+                    successful_updates += 1
+            
+            # Update document metadata
+            migration_stats = {
+                "total_sections": len(sections),
+                "successfully_contextualized": successful_updates,
+                "migration_date": datetime.now().isoformat()
+            }
+            
+            # Update document metadata to include migration info
+            current_metadata = document.get("metadata", {})
+            current_metadata["contextual_migration"] = migration_stats
+            
+            self.supabase.table("documents").update({"metadata": current_metadata}).eq("id", document_id).execute()
+            
+            # Rebuild BM25 index for this user
+            await self._rebuild_bm25_index(owner_id)
+            
+            logger.info(f"✅ [MIGRATION] Completed: {successful_updates}/{len(sections)} sections contextualized")
+            
+            return {
+                "success": True,
+                "sections_processed": successful_updates,
+                "total_sections": len(sections),
+                "document_title": document["title"]
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ [MIGRATION] Failed: {e}")
+            return {"success": False, "error": str(e)}

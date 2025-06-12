@@ -1,4 +1,4 @@
-# Supabase Setup Guide for Stage 6
+# Supabase Setup Guide with Contextual Retrieval Support
 
 ## Prerequisites
 
@@ -14,11 +14,20 @@
 3. Search for "vector"
 4. Click "Enable" on the pgvector extension
 
-### 2. Run Database Schema
+### 2. Run Database Schema with Contextual Retrieval Support
 
 1. Go to SQL Editor in your Supabase Dashboard
 2. Copy the contents of `backend/schema.sql`
 3. Run the SQL script
+
+**What's included in the schema:**
+- ✅ Documents and document_sections tables (original RAG)
+- ✅ Contextual retrieval fields (`contextual_content`, `is_contextualized`)
+- ✅ Statistics table for cost tracking (`contextual_processing_stats`)
+- ✅ All performance indexes including GIN indexes for metadata
+- ✅ Row Level Security (RLS) policies for all tables
+- ✅ Search functions (standard and contextual)
+- ✅ Statistics and utility functions
 
 ### 3. Get Your API Credentials
 
@@ -32,16 +41,53 @@
 Add to `backend/.env`:
 
 ```env
+# Database Configuration
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_KEY=your-anon-key
+
+# AI Provider API Keys
+OPENAI_API_KEY=your-openai-api-key
+ANTHROPIC_API_KEY=your-anthropic-api-key
+
+# RAG Configuration
+USE_HYBRID_SEARCH=true
+USE_RERANK=true
+
+# Contextual Retrieval Configuration (optional but recommended)
+ENABLE_CONTEXTUAL_RETRIEVAL=true
+CONTEXTUAL_RETRIEVAL_MODEL=claude-3-haiku-20240307
+MAX_CONTEXTUAL_TOKENS_PER_DOCUMENT=100000
+MAX_DAILY_CONTEXTUAL_REQUESTS=1000
+CONTEXTUAL_PROCESSING_TIMEOUT=120
 ```
 
 ### 5. Test the Setup
 
-Run the test script:
-
+Test the basic setup:
 ```bash
 ./test-stage6.sh
+```
+
+Test contextual retrieval:
+```bash
+cd backend
+python test_contextual_retrieval.py
+```
+
+### 6. Optional: Migrate Existing Documents
+
+If you have existing documents from before contextual retrieval, you can upgrade them:
+
+```bash
+cd backend
+# Dry run first to see what would be migrated
+python migrate_existing_documents.py --dry-run
+
+# Migrate specific user's documents
+python migrate_existing_documents.py --owner-id your-user-id
+
+# Or migrate all documents (be careful with costs!)
+python migrate_existing_documents.py
 ```
 
 ## Security Notes

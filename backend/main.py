@@ -405,3 +405,49 @@ async def get_document_context(request: SearchRequest):
             status_code=500,
             detail=f"Failed to get document context: {str(e)}"
         )
+
+
+# Contextual Retrieval API Endpoints
+
+@app.get("/api/contextual/stats")
+async def get_contextual_stats(owner_id: str, days_back: int = 30):
+    """Get contextual processing statistics for a user"""
+    try:
+        stats = await document_store.get_contextual_processing_stats(owner_id, days_back)
+        return stats
+    except Exception as e:
+        logger.error(f"Contextual stats error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/contextual/migrate")
+async def migrate_document_contextual(
+    document_id: str = Form(...),
+    owner_id: str = Form(...)
+):
+    """Migrate an existing document to use contextual retrieval"""
+    try:
+        result = await document_store.migrate_document_to_contextual(document_id, owner_id)
+        if result["success"]:
+            return result
+        else:
+            raise HTTPException(status_code=400, detail=result.get("error", "Migration failed"))
+    except Exception as e:
+        logger.error(f"Contextual migration error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/contextual/status")
+async def get_contextual_status():
+    """Get the status of contextual processing system"""
+    try:
+        if document_store._contextual_processor:
+            return document_store._contextual_processor.get_processing_stats()
+        else:
+            return {
+                "enabled": False,
+                "error": "Contextual processor not initialized"
+            }
+    except Exception as e:
+        logger.error(f"Contextual status error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

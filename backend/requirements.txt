@@ -11,3 +11,4 @@ pypdf2==3.0.1
 openai==1.58.1
 rank-bm25==0.2.2
 sentence-transformers==3.0.1
+anthropic>=0.34.0
