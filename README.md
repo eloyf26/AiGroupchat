@@ -3,7 +3,7 @@
 AI-powered group voice chat application with RAG capabilities, built with Next.js, FastAPI, LiveKit, and Supabase.
 
 ## 🎯 Current Status
-**7 out of 10 planned stages completed** - The application now supports voice conversations with AI agents that can reference uploaded documents in real-time!
+**Stage 8 completed** - The application now supports hybrid search and reranking for enhanced RAG accuracy!
 
 ## ✅ Completed Features
 
@@ -14,10 +14,12 @@ AI-powered group voice chat application with RAG capabilities, built with Next.j
 - **AI Agents**: 3 configurable personalities (Alex, Sophie, Marcus)
 - **ElevenLabs Voice**: High-quality, low-latency speech synthesis
 
-### RAG Capabilities (Stages 6-7)
+### RAG Capabilities (Stages 6-8)
 - **Document Upload**: PDF and text file processing
 - **Vector Database**: Supabase with pgvector for semantic search
 - **Smart Chunking**: 512-token chunks with overlap
+- **Hybrid Search**: BM25 keyword search + vector similarity with Reciprocal Rank Fusion
+- **Reranking**: CrossEncoder reranking for improved result quality
 - **Context Injection**: AI agents reference uploaded documents during conversations
 - **Real-time Retrieval**: Document context fetched and injected seamlessly
 
@@ -73,6 +75,7 @@ Run automated tests for each stage:
 ./test-stage5.sh  # Agent configuration
 ./test-stage6.sh  # Vector database
 ./test-stage7.sh  # RAG implementation
+./test-stage8.sh  # Hybrid search & reranking
 ```
 
 ## 🤖 AI Agent Personalities
@@ -105,6 +108,10 @@ curl -X POST http://localhost:8000/api/documents \
 # Then ask questions about it in voice chat!
 # "What did the document say about X?"
 # "Can you summarize the main points?"
+
+# Configure enhanced search (optional)
+export USE_HYBRID_SEARCH=true   # Enable BM25 + vector hybrid search
+export USE_RERANK=true          # Enable reranking for better results
 ```
 
 ## 📁 Project Structure

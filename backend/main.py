@@ -15,6 +15,13 @@ from agent_templates import get_agent_template, get_available_templates
 from document_store import DocumentStore
 
 # Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger("backend")
 
 load_dotenv()
@@ -29,6 +36,37 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Initialize document store globally
+document_store = DocumentStore()
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Pre-load models and initialize resources on startup"""
+    logger.info("🚀 Starting AiGroupchat Backend")
+    
+    # Pre-load the reranker model if enabled
+    if document_store.use_rerank:
+        logger.info("🧠 [RERANKER] Starting model pre-load...")
+        asyncio.create_task(load_reranker_model())
+    else:
+        logger.info("❌ [RERANKER] Reranking disabled")
+    
+    logger.info("✅ Backend ready")
+
+
+async def load_reranker_model():
+    """Load the reranker model in the background"""
+    model_name = os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+    logger.info(f"📦 [RERANKER] Loading {model_name}...")
+    
+    try:
+        await document_store._preload_reranker()
+        logger.info("🎉 [RERANKER] Model loaded successfully - reranking active")
+    except Exception as e:
+        logger.error(f"💥 [RERANKER] Loading failed: {e}")
+        logger.warning("⚠️  [RERANKER] Reranking disabled")
+
 
 class TokenRequest(BaseModel):
     room_name: str
@@ -40,6 +78,34 @@ class TokenRequest(BaseModel):
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "service": "AiGroupchat API"}
+
+
+@app.get("/api/health/reranker")
+async def reranker_status():
+    """Check the status of the reranker model"""
+    enabled = document_store.use_rerank
+    loaded = document_store._reranker is not None
+    model_name = os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2") if enabled else None
+    
+    # Determine status
+    if not enabled:
+        status = "disabled"
+    elif loaded:
+        status = "ready"
+    else:
+        status = "loading"
+    
+    return {
+        "enabled": enabled,
+        "loaded": loaded,
+        "status": status,
+        "model": model_name,
+        "message": {
+            "disabled": "Reranking is disabled in configuration",
+            "ready": "Reranker model is loaded and ready for use",
+            "loading": "Reranker model is being pre-loaded at startup"
+        }.get(status, "Unknown status")
+    }
 
 
 @app.post("/api/token")
@@ -163,8 +229,6 @@ class DocumentMetadata(BaseModel):
     metadata: Optional[dict] = None
 
 
-# Initialize document store
-document_store = DocumentStore()
 
 
 @app.post("/api/documents")
@@ -322,6 +386,7 @@ async def search_documents(request: SearchRequest):
 async def get_document_context(request: SearchRequest):
     """Get relevant context for a query to use in AI agent responses"""
     try:
+        # Get context directly 
         context = await document_store.get_context_for_query(
             query=request.query,
             owner_id=request.owner_id,
