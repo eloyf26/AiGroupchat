@@ -234,6 +234,13 @@ When implementing features, always refer to the provided documentation for best 
 - `httpx==0.27.2` - HTTP client for RAG context retrieval
 
 ## Recent Changes
+- **Performance Optimizations (2025)**:
+  - **Cache-Aware Rate Limiting**: Upgraded to Claude 3.5 Sonnet where cached tokens don't count against ITPM limits
+  - **Batch API Integration**: Automatic batch processing for documents ≥10 chunks (50% cost reduction)
+  - **Smart Processing Logic**: Streaming for small docs, batch for large docs
+  - **Combined Cost Savings**: Up to 95% cost reduction (90% caching + 50% batch discount)
+  - **Simplified Implementation**: Clean, deterministic processing pipeline
+
 - **Completed Contextual Retrieval Implementation (Stage 10)**:
   - Integrated Anthropic Claude API for contextual chunk enhancement
   - Implemented prompt caching for cost optimization (90% reduction)

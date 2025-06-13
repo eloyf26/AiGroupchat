@@ -1,14 +1,23 @@
+# Core API dependencies
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
-livekit-api==0.7.0
 python-dotenv==1.0.1
-supabase==2.10.0
 python-multipart==0.0.17
+
+# LiveKit integration
+livekit-api==0.7.0
+
+# RAG and document processing
+supabase==2.10.0
 langchain==0.3.14
 langchain-openai==0.2.14
 langchain-community==0.3.14
 pypdf2==3.0.1
 openai==1.58.1
+
+# Advanced search features (optional)
 rank-bm25==0.2.2
 sentence-transformers==3.0.1
+
+# Contextual processing (optional)
 anthropic>=0.34.0

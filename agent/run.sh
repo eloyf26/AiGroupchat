@@ -16,7 +16,16 @@ pip install -r requirements.txt
 
 # Download required models
 echo "Downloading required models..."
-python -m livekit.plugins.silero download
+# Note: Silero models are now auto-downloaded on first use
+# If you need to pre-download, use: python -c "from livekit.plugins import silero; silero.VAD.load()"
+python -c "
+try:
+    from livekit.plugins import silero
+    print('Silero plugin available - models will be downloaded on first use')
+except ImportError as e:
+    print(f'Warning: Could not import Silero plugin: {e}')
+    print('Agent will continue without VAD (Voice Activity Detection)')
+"
 
 # Run the agent
 echo "Starting AI agent..."

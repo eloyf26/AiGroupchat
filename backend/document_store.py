@@ -7,7 +7,8 @@ import os
 import uuid
 import time
 import asyncio
-from typing import List, Dict, Any, Optional
+import re
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 import tempfile
 import logging
@@ -24,8 +25,11 @@ from dotenv import load_dotenv
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
 
-# Contextual retrieval import
-from contextual_processor import ContextualProcessor
+# Contextual retrieval import (optional)
+try:
+    from contextual_processor import ContextualProcessor
+except ImportError:
+    ContextualProcessor = None
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -52,10 +56,15 @@ class DocumentStore:
             openai_api_key=openai_api_key
         )
         
-        # Initialize text splitter (800 tokens per chunk as per Anthropic recommendation)
+        # Initialize intelligent chunking system
+        self.intelligent_chunking = os.environ.get("INTELLIGENT_CHUNKING", "true").lower() == "true"
+        self.base_chunk_size = int(os.environ.get("BASE_CHUNK_SIZE", "800"))  # Anthropic recommendation
+        self.base_chunk_overlap = int(os.environ.get("BASE_CHUNK_OVERLAP", "80"))  # 10% overlap
+        
+        # Initialize base text splitter
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=800,  # Official Anthropic recommendation for contextual retrieval
-            chunk_overlap=80,  # 10% overlap as recommended
+            chunk_size=self.base_chunk_size,
+            chunk_overlap=self.base_chunk_overlap,
             length_function=len,
             separators=["\n\n", "\n", " ", ""]
         )
@@ -73,13 +82,15 @@ class DocumentStore:
         self._bm25_indexes = {}  # Pre-built BM25 indexes per user
         self._reranker = None  # Will be loaded by startup event if enabled
         
-        # Contextual processing
-        try:
-            self._contextual_processor = ContextualProcessor()
-            logger.info(f"🧠 [CONTEXTUAL] Processor initialized: {self._contextual_processor.enabled}")
-        except Exception as e:
-            logger.warning(f"🧠 [CONTEXTUAL] Failed to initialize: {e}")
-            self._contextual_processor = None
+        # Contextual processing (optional)
+        self._contextual_processor = None
+        if ContextualProcessor:
+            try:
+                self._contextual_processor = ContextualProcessor()
+                logger.info(f"🧠 [CONTEXTUAL] Processor initialized: {self._contextual_processor.enabled}")
+            except Exception as e:
+                logger.warning(f"🧠 [CONTEXTUAL] Failed to initialize: {e}")
+                self._contextual_processor = None
     
     async def process_file(self, file_path: str, file_type: str, owner_id: str, title: str) -> str:
         """
@@ -107,8 +118,18 @@ class DocumentStore:
         documents = loader.load()
         full_document_text = "\n\n".join([doc.page_content for doc in documents])
         
-        # Split documents into chunks
-        chunks = self.text_splitter.split_documents(documents)
+        # Split documents into chunks using intelligent chunking if enabled
+        if self.intelligent_chunking:
+            chunks, chunk_strategy = self._intelligent_chunk_documents(documents, file_type, title)
+            logger.info(f"📄 [CHUNKING] Used {chunk_strategy['strategy']} strategy: {chunk_strategy['chunk_size']} chars, {chunk_strategy['overlap']} overlap")
+        else:
+            chunks = self.text_splitter.split_documents(documents)
+            chunk_strategy = {
+                "strategy": "standard",
+                "chunk_size": self.base_chunk_size,
+                "overlap": self.base_chunk_overlap
+            }
+        
         chunk_contents = [chunk.page_content for chunk in chunks]
         
         logger.info(f"📄 [PROCESSING] Split into {len(chunks)} chunks")
@@ -118,10 +139,7 @@ class DocumentStore:
         contextual_stats = {
             "total_chunks": len(chunks),
             "processed_chunks": 0,
-            "failed_chunks": 0,
-            "total_tokens_used": 0,
-            "processing_time_seconds": 0,
-            "cost_estimate_usd": 0
+            "failed_chunks": 0
         }
         
         if self._contextual_processor and self._contextual_processor.enabled:
@@ -129,25 +147,14 @@ class DocumentStore:
                 start_time = time.time()
                 logger.info(f"🧠 [CONTEXTUAL] Starting enhancement for {len(chunks)} chunks")
                 
-                def progress_callback(current: int, total: int):
-                    logger.info(f"🧠 [CONTEXTUAL] Progress: {current}/{total} chunks processed")
-                
                 processed_chunks = await self._contextual_processor.process_document_chunks(
                     chunk_contents,
-                    full_document_text,
-                    title,
-                    progress_callback
+                    full_document_text
                 )
                 
                 processing_time = time.time() - start_time
-                contextual_stats["processing_time_seconds"] = processing_time
                 contextual_stats["processed_chunks"] = sum(1 for c in processed_chunks if c["is_contextualized"])
                 contextual_stats["failed_chunks"] = len(chunks) - contextual_stats["processed_chunks"]
-                
-                # Estimate cost (rough calculation: ~$1.02 per million tokens)
-                estimated_tokens = self._contextual_processor._estimate_tokens(full_document_text) * len(chunks)
-                contextual_stats["total_tokens_used"] = estimated_tokens
-                contextual_stats["cost_estimate_usd"] = (estimated_tokens / 1_000_000) * 1.02
                 
                 logger.info(f"🧠 [CONTEXTUAL] Enhanced {contextual_stats['processed_chunks']}/{len(chunks)} chunks in {processing_time:.2f}s")
                 
@@ -169,6 +176,7 @@ class DocumentStore:
             "metadata": {
                 "chunk_count": len(chunks),
                 "source_file": os.path.basename(file_path),
+                "chunking_strategy": chunk_strategy,
                 "contextual_processing": contextual_stats
             }
         }
@@ -213,17 +221,6 @@ class DocumentStore:
             # Insert chunk
             self.supabase.table("document_sections").insert(chunk_data).execute()
         
-        # Store contextual processing statistics
-        if contextual_stats["processed_chunks"] > 0 or contextual_stats["failed_chunks"] > 0:
-            stats_data = {
-                "document_id": document_id,
-                "owner_id": owner_id,
-                **contextual_stats
-            }
-            try:
-                self.supabase.table("contextual_processing_stats").insert(stats_data).execute()
-            except Exception as e:
-                logger.warning(f"Failed to store contextual stats: {e}")
         
         # Build BM25 index immediately in background
         await self._rebuild_bm25_index(owner_id)
@@ -715,138 +712,145 @@ class DocumentStore:
         
         return formatted_results
     
-    async def get_contextual_processing_stats(self, owner_id: str, days_back: int = 30) -> Dict[str, Any]:
-        """Get contextual processing statistics for a user"""
-        try:
-            response = self.supabase.rpc(
-                "get_contextual_processing_stats",
-                {"user_id": owner_id, "days_back": days_back}
-            ).execute()
-            
-            if response.data and len(response.data) > 0:
-                stats = response.data[0]
-                return {
-                    "total_documents": stats.get("total_documents", 0),
-                    "total_chunks": stats.get("total_chunks", 0),
-                    "total_tokens": stats.get("total_tokens", 0),
-                    "estimated_cost_usd": float(stats.get("estimated_cost_usd", 0)),
-                    "days_back": days_back
-                }
-            else:
-                return {
-                    "total_documents": 0,
-                    "total_chunks": 0,
-                    "total_tokens": 0,
-                    "estimated_cost_usd": 0.0,
-                    "days_back": days_back
-                }
-        except Exception as e:
-            logger.error(f"Error fetching contextual stats: {e}")
-            return {
-                "total_documents": 0,
-                "total_chunks": 0,
-                "total_tokens": 0,
-                "estimated_cost_usd": 0.0,
-                "days_back": days_back,
-                "error": str(e)
-            }
     
-    async def migrate_document_to_contextual(self, document_id: str, owner_id: str) -> Dict[str, Any]:
+    def _intelligent_chunk_documents(self, documents: List[Document], file_type: str, title: str) -> Tuple[List[Document], Dict[str, Any]]:
         """
-        Migrate an existing document to use contextual retrieval
+        Apply intelligent chunking strategy based on document characteristics
         
         Args:
-            document_id: ID of the document to migrate
-            owner_id: Owner of the document
+            documents: List of document objects to chunk
+            file_type: Type of the document
+            title: Document title for analysis
             
         Returns:
-            Migration results
+            Tuple of (chunked_documents, chunking_strategy)
         """
-        if not self._contextual_processor or not self._contextual_processor.enabled:
-            return {"success": False, "error": "Contextual processing not available"}
+        # Analyze document characteristics
+        doc_analysis = self._analyze_document_characteristics(documents, file_type, title)
         
-        try:
-            # Get document and its sections
-            doc_response = self.supabase.table("documents").select("*").eq("id", document_id).eq("owner_id", owner_id).execute()
-            if not doc_response.data:
-                return {"success": False, "error": "Document not found"}
+        # Determine optimal chunking strategy
+        chunk_strategy = self._determine_chunking_strategy(doc_analysis)
+        
+        # Create optimized text splitter
+        optimized_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_strategy["chunk_size"],
+            chunk_overlap=chunk_strategy["overlap"],
+            length_function=len,
+            separators=chunk_strategy["separators"]
+        )
+        
+        # Apply chunking
+        chunks = optimized_splitter.split_documents(documents)
+        
+        return chunks, chunk_strategy
+    
+    def _analyze_document_characteristics(self, documents: List[Document], file_type: str, title: str) -> Dict[str, Any]:
+        """
+        Analyze document characteristics to inform chunking strategy
+        """
+        full_text = "\n\n".join([doc.page_content for doc in documents])
+        
+        # Basic statistics
+        total_length = len(full_text)
+        line_count = full_text.count('\n')
+        paragraph_count = full_text.count('\n\n')
+        avg_line_length = total_length / max(line_count, 1)
+        
+        # Content structure analysis
+        has_headers = bool(re.search(r'^#+\s', full_text, re.MULTILINE)) or bool(re.search(r'^[A-Z][A-Za-z\s]+:$', full_text, re.MULTILINE))
+        has_lists = bool(re.search(r'^\s*[-*+]\s', full_text, re.MULTILINE)) or bool(re.search(r'^\s*\d+\.\s', full_text, re.MULTILINE))
+        has_code = bool(re.search(r'```', full_text)) or bool(re.search(r'`[^`]+`', full_text))
+        has_tables = bool(re.search(r'\|.*\|', full_text))
+        
+        # Language and content type detection
+        sentence_count = len(re.findall(r'[.!?]+', full_text))
+        avg_sentence_length = total_length / max(sentence_count, 1)
+        
+        # Technical content indicators
+        has_technical_terms = bool(re.search(r'\b(API|JSON|XML|HTTP|SQL|function|class|method|algorithm)\b', full_text, re.IGNORECASE))
+        has_academic_content = bool(re.search(r'\b(research|study|analysis|conclusion|methodology|hypothesis)\b', full_text, re.IGNORECASE))
+        
+        return {
+            "total_length": total_length,
+            "line_count": line_count,
+            "paragraph_count": paragraph_count,
+            "avg_line_length": avg_line_length,
+            "avg_sentence_length": avg_sentence_length,
+            "has_headers": has_headers,
+            "has_lists": has_lists,
+            "has_code": has_code,
+            "has_tables": has_tables,
+            "has_technical_terms": has_technical_terms,
+            "has_academic_content": has_academic_content,
+            "file_type": file_type,
+            "title_lower": title.lower()
+        }
+    
+    def _determine_chunking_strategy(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Determine optimal chunking strategy based on document analysis
+        """
+        chunk_size = self.base_chunk_size
+        overlap = self.base_chunk_overlap
+        separators = ["\n\n", "\n", " ", ""]
+        strategy_name = "standard"
+        
+        # Adjust for document structure
+        if analysis["has_headers"] and analysis["paragraph_count"] > 10:
+            # Documents with clear structure: larger chunks to preserve context
+            chunk_size = int(self.base_chunk_size * 1.2)
+            overlap = int(self.base_chunk_overlap * 1.2)
+            separators = ["\n\n", "\n", " ", ""]
+            strategy_name = "structured"
             
-            document = doc_response.data[0]
+        elif analysis["has_code"] or analysis["has_technical_terms"]:
+            # Technical documents: smaller chunks for precision
+            chunk_size = int(self.base_chunk_size * 0.8)
+            overlap = int(self.base_chunk_overlap * 1.5)  # More overlap for technical content
+            separators = ["\n\n", "\n", "```", " ", ""]
+            strategy_name = "technical"
             
-            # Get all sections for this document
-            sections_response = self.supabase.table("document_sections").select("*").eq("document_id", document_id).order("chunk_index").execute()
-            sections = sections_response.data
+        elif analysis["has_academic_content"]:
+            # Academic content: medium chunks with semantic boundaries
+            chunk_size = int(self.base_chunk_size * 1.1)
+            overlap = int(self.base_chunk_overlap * 1.3)
+            separators = ["\n\n", ". ", "\n", " ", ""]
+            strategy_name = "academic"
             
-            if not sections:
-                return {"success": False, "error": "No sections found for document"}
+        elif analysis["avg_sentence_length"] > 100:
+            # Long sentences: smaller chunks
+            chunk_size = int(self.base_chunk_size * 0.9)
+            overlap = int(self.base_chunk_overlap * 1.1)
+            separators = ["\n\n", ". ", "\n", " ", ""]
+            strategy_name = "long_sentences"
             
-            # Check if already contextualized
-            contextualized_count = sum(1 for s in sections if s.get("is_contextualized"))
-            if contextualized_count == len(sections):
-                return {"success": True, "message": "Document already fully contextualized", "sections_processed": 0}
+        elif analysis["total_length"] < 2000:
+            # Short documents: minimal chunking
+            chunk_size = max(analysis["total_length"] // 2, 400)
+            overlap = int(chunk_size * 0.1)
+            strategy_name = "minimal"
             
-            # Reconstruct full document from sections
-            full_document_text = "\n\n".join([section["content"] for section in sections])
-            chunk_contents = [section["content"] for section in sections]
-            
-            logger.info(f"🔄 [MIGRATION] Starting contextual migration for document: {document['title']}")
-            
-            # Process chunks with contextual enhancement
-            processed_chunks = await self._contextual_processor.process_document_chunks(
-                chunk_contents,
-                full_document_text,
-                document["title"]
-            )
-            
-            # Update sections with contextual content and re-embed
-            successful_updates = 0
-            for idx, (section, processed_chunk) in enumerate(zip(sections, processed_chunks)):
-                if processed_chunk["is_contextualized"]:
-                    # Create new embedding with contextual content
-                    content_to_embed = f"{processed_chunk['contextual_content']}\n\n{processed_chunk['content']}"
-                    new_embedding = self.embeddings.embed_query(content_to_embed)
-                    
-                    # Update the section
-                    update_data = {
-                        "contextual_content": processed_chunk["contextual_content"],
-                        "is_contextualized": True,
-                        "embedding": new_embedding,
-                        "contextual_metadata": {
-                            "migrated_at": datetime.now().isoformat(),
-                            "content_length": len(processed_chunk["content"]),
-                            "contextual_length": len(processed_chunk["contextual_content"]),
-                            "embedded_with_context": True
-                        }
-                    }
-                    
-                    self.supabase.table("document_sections").update(update_data).eq("id", section["id"]).execute()
-                    successful_updates += 1
-            
-            # Update document metadata
-            migration_stats = {
-                "total_sections": len(sections),
-                "successfully_contextualized": successful_updates,
-                "migration_date": datetime.now().isoformat()
-            }
-            
-            # Update document metadata to include migration info
-            current_metadata = document.get("metadata", {})
-            current_metadata["contextual_migration"] = migration_stats
-            
-            self.supabase.table("documents").update({"metadata": current_metadata}).eq("id", document_id).execute()
-            
-            # Rebuild BM25 index for this user
-            await self._rebuild_bm25_index(owner_id)
-            
-            logger.info(f"✅ [MIGRATION] Completed: {successful_updates}/{len(sections)} sections contextualized")
-            
-            return {
-                "success": True,
-                "sections_processed": successful_updates,
-                "total_sections": len(sections),
-                "document_title": document["title"]
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ [MIGRATION] Failed: {e}")
-            return {"success": False, "error": str(e)}
+        elif analysis["has_lists"] and analysis["has_tables"]:
+            # Structured data: preserve list and table boundaries
+            chunk_size = int(self.base_chunk_size * 0.9)
+            overlap = int(self.base_chunk_overlap * 0.8)  # Less overlap for structured data
+            separators = ["\n\n", "\n\n", "\n", "- ", "* ", "+ ", " ", ""]
+            strategy_name = "structured_data"
+        
+        # Apply file type specific adjustments
+        if analysis["file_type"] == "pdf" and "manual" in analysis["title_lower"]:
+            # PDF manuals often have complex layouts
+            chunk_size = int(chunk_size * 1.1)
+            strategy_name += "_manual"
+        
+        # Ensure minimum and maximum bounds
+        chunk_size = max(300, min(chunk_size, 1200))  # Keep within reasonable bounds
+        overlap = max(30, min(overlap, chunk_size // 3))  # Overlap should not exceed 1/3 of chunk
+        
+        return {
+            "strategy": strategy_name,
+            "chunk_size": chunk_size,
+            "overlap": overlap,
+            "separators": separators,
+            "reasoning": f"Applied {strategy_name} strategy based on document analysis"
+        }

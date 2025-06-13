@@ -7,10 +7,8 @@ import json
 import asyncio
 import logging
 import tempfile
-import shutil
 from dotenv import load_dotenv
 from typing import Optional, List
-from uuid import UUID
 from agent_templates import get_agent_template, get_available_templates
 from document_store import DocumentStore
 
@@ -42,7 +40,7 @@ document_store = DocumentStore()
 
 @app.on_event("startup")
 async def startup_event():
-    """Pre-load models and initialize resources on startup"""
+    """Initialize resources on startup"""
     logger.info("🚀 Starting AiGroupchat Backend")
     
     # Pre-load the reranker model if enabled
@@ -53,6 +51,13 @@ async def startup_event():
         logger.info("❌ [RERANKER] Reranking disabled")
     
     logger.info("✅ Backend ready")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up resources on shutdown"""
+    logger.info("🛑 Shutting down AiGroupchat Backend")
+    logger.info("👋 Backend shutdown complete")
 
 
 async def load_reranker_model():
@@ -78,34 +83,6 @@ class TokenRequest(BaseModel):
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "service": "AiGroupchat API"}
-
-
-@app.get("/api/health/reranker")
-async def reranker_status():
-    """Check the status of the reranker model"""
-    enabled = document_store.use_rerank
-    loaded = document_store._reranker is not None
-    model_name = os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2") if enabled else None
-    
-    # Determine status
-    if not enabled:
-        status = "disabled"
-    elif loaded:
-        status = "ready"
-    else:
-        status = "loading"
-    
-    return {
-        "enabled": enabled,
-        "loaded": loaded,
-        "status": status,
-        "model": model_name,
-        "message": {
-            "disabled": "Reranking is disabled in configuration",
-            "ready": "Reranker model is loaded and ready for use",
-            "loading": "Reranker model is being pre-loaded at startup"
-        }.get(status, "Unknown status")
-    }
 
 
 @app.post("/api/token")
@@ -221,15 +198,7 @@ async def get_agent_template_details(template_type: str):
     }
 
 
-# Document Management Endpoints for Stage 6
-
-class DocumentMetadata(BaseModel):
-    title: str
-    type: str = "text"
-    metadata: Optional[dict] = None
-
-
-
+# Document Management Endpoints
 
 @app.post("/api/documents")
 async def upload_document(
@@ -237,7 +206,7 @@ async def upload_document(
     title: str = Form(...),
     owner_id: str = Form(...),
 ):
-    """Upload and process a document with embeddings for Stage 7"""
+    """Upload and process a document with embeddings"""
     try:
         # Determine file type from extension
         filename = file.filename.lower()
@@ -359,7 +328,7 @@ class SearchRequest(BaseModel):
 
 @app.post("/api/documents/search")
 async def search_documents(request: SearchRequest):
-    """Search documents using semantic similarity for Stage 7"""
+    """Search documents using semantic similarity"""
     try:
         results = await document_store.search_documents(
             query=request.query,
@@ -405,49 +374,3 @@ async def get_document_context(request: SearchRequest):
             status_code=500,
             detail=f"Failed to get document context: {str(e)}"
         )
-
-
-# Contextual Retrieval API Endpoints
-
-@app.get("/api/contextual/stats")
-async def get_contextual_stats(owner_id: str, days_back: int = 30):
-    """Get contextual processing statistics for a user"""
-    try:
-        stats = await document_store.get_contextual_processing_stats(owner_id, days_back)
-        return stats
-    except Exception as e:
-        logger.error(f"Contextual stats error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/contextual/migrate")
-async def migrate_document_contextual(
-    document_id: str = Form(...),
-    owner_id: str = Form(...)
-):
-    """Migrate an existing document to use contextual retrieval"""
-    try:
-        result = await document_store.migrate_document_to_contextual(document_id, owner_id)
-        if result["success"]:
-            return result
-        else:
-            raise HTTPException(status_code=400, detail=result.get("error", "Migration failed"))
-    except Exception as e:
-        logger.error(f"Contextual migration error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/contextual/status")
-async def get_contextual_status():
-    """Get the status of contextual processing system"""
-    try:
-        if document_store._contextual_processor:
-            return document_store._contextual_processor.get_processing_stats()
-        else:
-            return {
-                "enabled": False,
-                "error": "Contextual processor not initialized"
-            }
-    except Exception as e:
-        logger.error(f"Contextual status error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))

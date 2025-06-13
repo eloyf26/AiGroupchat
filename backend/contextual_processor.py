@@ -1,15 +1,15 @@
 """
 Contextual Processor for RAG Enhancement
-Implements Anthropic's Contextual Retrieval method with prompt caching optimization
+Implements Anthropic's Contextual Retrieval method with prompt caching
+Supports both batch and streaming modes as configurable options
 """
 
 import os
 import time
 import asyncio
 import logging
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 from datetime import datetime
-import json
 
 import anthropic
 from dotenv import load_dotenv
@@ -20,341 +20,325 @@ logger = logging.getLogger(__name__)
 
 class ContextualProcessor:
     """
-    Handles contextual enhancement of document chunks using Claude with prompt caching
+    Contextual processor with deterministic behavior
+    - Configurable batch or streaming processing (no fallbacks)
+    - Simple rate limiting
+    - No fallbacks or retries
+    - Clear error handling
     """
     
     def __init__(self):
-        """Initialize the contextual processor with Anthropic client"""
+        """Initialize with minimal configuration"""
         self.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not self.anthropic_api_key:
             raise ValueError("ANTHROPIC_API_KEY environment variable is required")
         
         self.client = anthropic.Anthropic(api_key=self.anthropic_api_key)
-        
-        # Configuration from environment
         self.enabled = os.environ.get("ENABLE_CONTEXTUAL_RETRIEVAL", "true").lower() == "true"
-        self.model = os.environ.get("CONTEXTUAL_RETRIEVAL_MODEL", "claude-3-haiku-20240307")
+        self.model = os.environ.get("CONTEXTUAL_RETRIEVAL_MODEL", "claude-3-7-sonnet-latest")
         self.max_tokens_per_doc = int(os.environ.get("MAX_CONTEXTUAL_TOKENS_PER_DOCUMENT", "100000"))
         self.processing_timeout = int(os.environ.get("CONTEXTUAL_PROCESSING_TIMEOUT", "120"))
-        self.max_daily_requests = int(os.environ.get("MAX_DAILY_CONTEXTUAL_REQUESTS", "1000"))
         
-        # Token usage tracking (official Anthropic approach)
-        self.token_counts = {
-            'input': 0,
-            'output': 0,
-            'cache_read': 0,
-            'cache_creation': 0
-        }
-        self._daily_request_count = 0
-        self._last_reset_date = datetime.now().date()
+        # Processing mode configuration (no fallback between modes)
+        self.use_batch_api = os.environ.get("CONTEXTUAL_USE_BATCH_API", "false").lower() == "true"
+        self.batch_threshold = int(os.environ.get("CONTEXTUAL_BATCH_THRESHOLD", "10"))
+        self.batch_timeout = int(os.environ.get("CONTEXTUAL_BATCH_TIMEOUT", "3600"))
         
-        # Prompt caching configuration
-        self.use_cache = True
-        self.cache_ttl = int(os.environ.get("CONTEXTUAL_CACHE_TTL", "3600"))
+        # Simple rate limiting - just request spacing
+        self.min_request_interval = 2.0  # 2 seconds between requests (30 RPM max)
+        self.last_request_time = 0
         
-        logger.info(f"🧠 [CONTEXTUAL] Initialized - Model: {self.model}, Enabled: {self.enabled}, Cache: {self.use_cache}")
+        # Basic tracking
+        self.total_requests = 0
+        self.successful_requests = 0
+        
+        processing_mode = "batch" if self.use_batch_api else "streaming"
+        logger.info(f"🧠 [CONTEXTUAL] Initialized - Model: {self.model}, Mode: {processing_mode}, Enabled: {self.enabled}")
     
-    def _build_contextual_prompt(self, chunk: str, document: str) -> List[Dict[str, Any]]:
-        """
-        Build a prompt using the exact official Anthropic format with proper caching
+    def _build_prompt(self, chunk: str, document: str) -> Dict[str, Any]:
+        """Build prompt with system message caching"""
+        system_messages = [
+            {
+                "type": "text",
+                "text": "You are an AI assistant that helps create contextual information for document chunks to improve search retrieval."
+            },
+            {
+                "type": "text", 
+                "text": f"<document>\n{document}\n</document>",
+                "cache_control": {"type": "ephemeral"}
+            }
+        ]
         
-        Args:
-            chunk: The specific chunk to contextualize
-            document: The full document content
-            
-        Returns:
-            List of message objects with cache control (no system prompt needed)
-        """
-        # Document content (cacheable - this is the expensive part)
-        document_message = {
-            "type": "text", 
-            "text": f"<document>\n{document}\n</document>",
-            "cache_control": {"type": "ephemeral"}
-        }
-        
-        # Chunk and request (exact Anthropic format - not cached)
-        chunk_message = {
-            "type": "text",
-            "text": f"""Here is the chunk we want to situate within the whole document
+        user_message = f"""Here is the chunk we want to situate within the whole document:
+
 <chunk>
 {chunk}
 </chunk>
+
 Please give a short succinct context to situate this chunk within the overall document for the purposes of improving search retrieval of the chunk. Answer only with the succinct context and nothing else."""
+        
+        return {
+            "system": system_messages,
+            "messages": [{"role": "user", "content": user_message}]
         }
-        
-        return [
-            {"role": "user", "content": [document_message, chunk_message]}
-        ]
     
-    async def generate_chunk_context(
-        self, 
-        chunk: str, 
-        full_document: str,
-        document_title: str = ""
-    ) -> Optional[str]:
-        """
-        Generate contextual information for a single chunk
+    async def _wait_for_rate_limit(self):
+        """Simple rate limiting - just ensure minimum interval between requests"""
+        now = time.time()
+        time_since_last = now - self.last_request_time
         
-        Args:
-            chunk: The chunk content to contextualize
-            full_document: The complete document content
-            document_title: Optional document title for better context
-            
-        Returns:
-            Contextual description or None if failed
-        """
+        if time_since_last < self.min_request_interval:
+            wait_time = self.min_request_interval - time_since_last
+            logger.debug(f"⏰ Rate limiting: waiting {wait_time:.1f}s")
+            await asyncio.sleep(wait_time)
+        
+        self.last_request_time = time.time()
+    
+    async def _make_request(self, system: List[Dict], messages: List[Dict]) -> str:
+        """Make API request with simple error handling"""
+        def make_request():
+            return self.client.messages.create(
+                model=self.model,
+                max_tokens=1024,
+                temperature=0.0,
+                system=system,
+                messages=messages,
+                extra_headers={
+                    "anthropic-beta": "prompt-caching-2024-07-31"
+                }
+            )
+        
+        response = await asyncio.get_event_loop().run_in_executor(None, make_request)
+        return response.content[0].text.strip()
+    
+    async def generate_chunk_context(self, chunk: str, full_document: str) -> Optional[str]:
+        """Generate context for a single chunk - simple and deterministic"""
         if not self.enabled:
             return None
         
         try:
-            # Check daily limits
-            if not self._check_rate_limits():
-                logger.warning("[CONTEXTUAL] Daily rate limit exceeded")
+            # Check document size
+            doc_tokens = len(full_document) // 4  # Rough estimate
+            if doc_tokens > self.max_tokens_per_doc:
+                logger.warning(f"[CONTEXTUAL] Document too large ({doc_tokens} tokens), skipping")
                 return None
             
-            # Build prompt with caching (official Anthropic format)
-            messages = self._build_contextual_prompt(chunk, full_document)
+            # Rate limiting
+            await self._wait_for_rate_limit()
             
-            # Make API call with timeout
-            start_time = time.time()
+            # Build prompt
+            prompt_data = self._build_prompt(chunk, full_document)
             
-            response = await asyncio.wait_for(
-                self._make_claude_request(messages),
+            # Make request with timeout
+            self.total_requests += 1
+            context = await asyncio.wait_for(
+                self._make_request(prompt_data["system"], prompt_data["messages"]),
                 timeout=self.processing_timeout
             )
             
-            processing_time = time.time() - start_time
-            
-            # Extract context from response
-            context = response.content[0].text.strip()
-            
-            # Validate context
-            if self._validate_context(context, chunk):
-                logger.debug(f"[CONTEXTUAL] Generated context in {processing_time:.2f}s: {context[:100]}...")
-                self._daily_request_count += 1
+            # Simple validation
+            if context and context.strip():
+                self.successful_requests += 1
+                logger.debug(f"[CONTEXTUAL] Generated context: {context[:100]}...")
                 return context
             else:
-                logger.warning(f"[CONTEXTUAL] Invalid context generated: {context[:100]}...")
+                logger.warning("[CONTEXTUAL] Empty context returned")
                 return None
                 
         except asyncio.TimeoutError:
             logger.error(f"[CONTEXTUAL] Timeout after {self.processing_timeout}s")
             return None
         except anthropic.APIError as e:
-            logger.error(f"[CONTEXTUAL] Anthropic API error: {e}")
+            logger.error(f"[CONTEXTUAL] API error: {e}")
             return None
         except Exception as e:
             logger.error(f"[CONTEXTUAL] Unexpected error: {e}")
             return None
     
-    async def _make_claude_request(self, messages: List[Dict]) -> anthropic.types.Message:
-        """Make the actual Claude API request using GA prompt caching"""
-        def make_request():
-            try:
-                # Use the GA prompt caching API with token-efficient tools header
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=1024,  # Official recommendation
-                    temperature=0.0,  # Official recommendation for deterministic results
-                    messages=messages,
-                    extra_headers={
-                        "anthropic-beta": "token-efficient-tools-2025-02-19"
-                    }
-                )
-                
-                # Track token usage (official Anthropic approach)
-                if hasattr(response, 'usage'):
-                    usage = response.usage
-                    self.token_counts['input'] += getattr(usage, 'input_tokens', 0)
-                    self.token_counts['output'] += getattr(usage, 'output_tokens', 0)
-                    
-                    # Track cache metrics if available
-                    if hasattr(usage, 'cache_read_input_tokens'):
-                        self.token_counts['cache_read'] += getattr(usage, 'cache_read_input_tokens', 0)
-                    if hasattr(usage, 'cache_creation_input_tokens'):
-                        self.token_counts['cache_creation'] += getattr(usage, 'cache_creation_input_tokens', 0)
-                    
-                    # Log cache effectiveness with more detail
-                    cache_read = self.token_counts['cache_read']
-                    cache_creation = self.token_counts['cache_creation']
-                    total_input = self.token_counts['input']
-                    current_input = getattr(usage, 'input_tokens', 0)
-                    current_cache_read = getattr(usage, 'cache_read_input_tokens', 0)
-                    
-                    if total_input > 0:
-                        cache_hit_rate = cache_read / (cache_read + cache_creation) if (cache_read + cache_creation) > 0 else 0
-                        logger.info(f"[CACHE] Request tokens - Input: {current_input}, Cache Read: {current_cache_read}, Hit rate: {cache_hit_rate:.2%}")
-                        
-                        # Verify cache is working properly after first request
-                        if self.token_counts['cache_creation'] > 0 and current_cache_read == 0:
-                            logger.warning("[CACHE] Expected cache hit but got none - cache may not be working properly")
-                
-                return response
-                
-            except Exception as e:
-                logger.error(f"[CONTEXTUAL] API error: {e}")
-                raise
+    async def _process_streaming(
+        self, 
+        chunks: List[str], 
+        full_document: str,
+        progress_callback: Optional[callable] = None
+    ) -> List[Dict[str, Any]]:
+        """Process chunks sequentially with streaming API"""
+        logger.info(f"[STREAMING] Processing {len(chunks)} chunks sequentially")
         
-        return await asyncio.get_event_loop().run_in_executor(None, make_request)
-    
-    def _validate_context(self, context: str, chunk: str) -> bool:
-        """
-        Validate the generated context
+        processed_chunks = []
+        successful_contexts = 0
         
-        Args:
-            context: Generated contextual description
-            chunk: Original chunk content
+        for idx, chunk in enumerate(chunks):
+            logger.debug(f"[STREAMING] Processing chunk {idx + 1}/{len(chunks)}")
             
-        Returns:
-            True if context is valid
-        """
-        if not context or len(context.strip()) < 10:
-            return False
+            context = await self.generate_chunk_context(chunk, full_document)
+            
+            if context:
+                successful_contexts += 1
+            
+            processed_chunks.append({
+                "content": chunk,
+                "contextual_content": context,
+                "is_contextualized": context is not None
+            })
+            
+            if progress_callback:
+                progress_callback(idx + 1, len(chunks))
         
-        # Check if context is too long (should be brief)
-        if len(context) > 500:
-            return False
+        success_rate = (successful_contexts / len(chunks)) * 100 if chunks else 0
+        logger.info(f"[STREAMING] Completed: {successful_contexts}/{len(chunks)} chunks ({success_rate:.1f}%)")
         
-        # Check if context is just repeating the chunk
-        chunk_words = set(chunk.lower().split())
-        context_words = set(context.lower().split())
-        overlap_ratio = len(chunk_words.intersection(context_words)) / len(context_words) if context_words else 0
-        
-        if overlap_ratio > 0.8:  # Too much overlap
-            return False
-        
-        return True
+        return processed_chunks
     
-    def _check_rate_limits(self) -> bool:
-        """Check if we're within daily rate limits"""
-        current_date = datetime.now().date()
+    async def _process_batch(
+        self, 
+        chunks: List[str], 
+        full_document: str,
+        progress_callback: Optional[callable] = None
+    ) -> List[Dict[str, Any]]:
+        """Process chunks using Batch API - no fallback to streaming"""
+        logger.info(f"[BATCH] Processing {len(chunks)} chunks via Batch API")
         
-        # Reset counter if it's a new day
-        if current_date != self._last_reset_date:
-            self._daily_request_count = 0
-            self._last_reset_date = current_date
+        # Create batch requests
+        batch_requests = []
+        for idx, chunk in enumerate(chunks):
+            prompt_data = self._build_prompt(chunk, full_document)
+            request = {
+                "custom_id": f"chunk_{idx}",
+                "params": {
+                    "model": self.model,
+                    "max_tokens": 1024,
+                    "temperature": 0.0,
+                    "system": prompt_data["system"],
+                    "messages": prompt_data["messages"]
+                }
+            }
+            batch_requests.append(request)
         
-        return self._daily_request_count < self.max_daily_requests
+        # Submit batch (synchronous call in executor)
+        def submit_batch():
+            return self.client.messages.batches.create(requests=batch_requests)
+        
+        logger.info(f"[BATCH] Submitting {len(batch_requests)} requests")
+        batch_response = await asyncio.get_event_loop().run_in_executor(None, submit_batch)
+        
+        # Wait for completion
+        logger.info(f"[BATCH] Waiting for completion (ID: {batch_response.id})")
+        results = await self._wait_for_batch_completion(batch_response.id, progress_callback)
+        
+        # Process results
+        processed_chunks = []
+        successful_contexts = 0
+        
+        for idx, chunk in enumerate(chunks):
+            custom_id = f"chunk_{idx}"
+            if custom_id in results:
+                context = results[custom_id].content[0].text.strip()
+                if context and context.strip():
+                    successful_contexts += 1
+                else:
+                    context = None
+            else:
+                context = None
+                logger.warning(f"[BATCH] No result for chunk {idx}")
+            
+            processed_chunks.append({
+                "content": chunk,
+                "contextual_content": context,
+                "is_contextualized": context is not None
+            })
+        
+        success_rate = (successful_contexts / len(chunks)) * 100 if chunks else 0
+        logger.info(f"[BATCH] Completed: {successful_contexts}/{len(chunks)} chunks ({success_rate:.1f}%)")
+        
+        return processed_chunks
+    
+    async def _wait_for_batch_completion(self, batch_id: str, progress_callback=None) -> Dict:
+        """Wait for batch completion and return results"""
+        start_time = time.time()
+        
+        while True:
+            # Check batch status
+            def retrieve_batch():
+                return self.client.messages.batches.retrieve(batch_id)
+            
+            batch = await asyncio.get_event_loop().run_in_executor(None, retrieve_batch)
+            
+            if batch.processing_status == "ended":
+                # Get results
+                def get_results():
+                    return self.client.messages.batches.results(batch_id)
+                
+                results_response = await asyncio.get_event_loop().run_in_executor(None, get_results)
+                
+                # Parse results
+                results = {}
+                for result in results_response:
+                    if result.result.type == "succeeded":
+                        results[result.custom_id] = result.result.message
+                
+                processing_time = time.time() - start_time
+                logger.info(f"[BATCH] Processing completed in {processing_time:.1f}s")
+                return results
+                
+            elif batch.processing_status in ["failed", "expired"]:
+                raise Exception(f"Batch processing failed: {batch.processing_status}")
+            
+            # Wait before next check
+            await asyncio.sleep(30)
+            
+            # Timeout check
+            if time.time() - start_time > self.batch_timeout:
+                raise Exception(f"Batch processing timeout after {self.batch_timeout}s")
     
     async def process_document_chunks(
         self, 
         chunks: List[str], 
         full_document: str,
-        document_title: str = "",
         progress_callback: Optional[callable] = None
     ) -> List[Dict[str, Any]]:
         """
-        Process multiple chunks for a document with contextual enhancement
-        
-        Args:
-            chunks: List of document chunks
-            full_document: Complete document content
-            document_title: Document title for context
-            progress_callback: Optional callback for progress updates
-            
-        Returns:
-            List of processed chunks with contextual information
+        Process document chunks with configurable batch or streaming mode
+        - No fallbacks between modes
+        - Deterministic behavior
+        - Clear failure modes
         """
         if not self.enabled:
-            logger.info("[CONTEXTUAL] Processing disabled, returning original chunks")
+            logger.info("[CONTEXTUAL] Processing disabled")
             return [{"content": chunk, "contextual_content": None, "is_contextualized": False} 
                    for chunk in chunks]
         
-        # Check document size limits
-        doc_tokens = self._estimate_tokens(full_document)
+        # Check document size
+        doc_tokens = len(full_document) // 4
         if doc_tokens > self.max_tokens_per_doc:
-            logger.warning(f"[CONTEXTUAL] Document too large ({doc_tokens} tokens), skipping contextualization")
+            logger.warning(f"[CONTEXTUAL] Document too large ({doc_tokens} tokens), skipping")
             return [{"content": chunk, "contextual_content": None, "is_contextualized": False} 
                    for chunk in chunks]
         
-        logger.info(f"[CONTEXTUAL] Processing {len(chunks)} chunks for document: {document_title[:50]}...")
-        logger.info(f"[CONTEXTUAL] Using sequential processing with 1s delays to respect rate limits")
-        
-        processed_chunks = []
-        successful_contexts = 0
-        
-        # Process chunks with concurrency control
-        # Using semaphore=1 for sequential processing to respect Anthropic's concurrent request limits
-        # and ensure proper cache creation on first request
-        semaphore = asyncio.Semaphore(1)  # Sequential processing for rate limit compliance
-        
-        async def process_single_chunk(idx: int, chunk: str) -> Dict[str, Any]:
-            async with semaphore:
-                # Add delay between requests to avoid burst issues (except for first chunk)
-                if idx > 0:
-                    await asyncio.sleep(1.0)  # 1 second delay to stay well under rate limits
-                
-                context = await self.generate_chunk_context(chunk, full_document, document_title)
-                
-                if progress_callback:
-                    progress_callback(idx + 1, len(chunks))
-                
-                return {
-                    "content": chunk,
-                    "contextual_content": context,
-                    "is_contextualized": context is not None
-                }
-        
-        # Process all chunks concurrently
-        tasks = [process_single_chunk(idx, chunk) for idx, chunk in enumerate(chunks)]
-        processed_chunks = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Handle any exceptions
-        final_results = []
-        for idx, result in enumerate(processed_chunks):
-            if isinstance(result, Exception):
-                logger.error(f"[CONTEXTUAL] Error processing chunk {idx}: {result}")
-                final_results.append({
-                    "content": chunks[idx],
-                    "contextual_content": None,
-                    "is_contextualized": False
-                })
-            else:
-                final_results.append(result)
-                if result["is_contextualized"]:
-                    successful_contexts += 1
-        
-        success_rate = (successful_contexts / len(chunks)) * 100 if chunks else 0
-        logger.info(f"[CONTEXTUAL] Completed: {successful_contexts}/{len(chunks)} chunks contextualized ({success_rate:.1f}%)")
-        
-        return final_results
-    
-    def _estimate_tokens(self, text: str) -> int:
-        """Rough estimation of token count"""
-        # Anthropic uses ~4 characters per token on average
-        return len(text) // 4
-    
-    def get_processing_stats(self) -> Dict[str, Any]:
-        """Get current processing statistics including cache metrics"""
-        # Calculate cache efficiency
-        cache_read = self.token_counts['cache_read']
-        cache_creation = self.token_counts['cache_creation']
-        total_cached = cache_read + cache_creation
-        cache_hit_rate = cache_read / total_cached if total_cached > 0 else 0
-        
-        # Calculate cost savings (approximate)
-        total_input = self.token_counts['input']
-        if total_input > 0:
-            # Cache reads are 90% cheaper than regular tokens
-            cost_without_cache = total_input * 1.0  # Baseline cost
-            cost_with_cache = (cache_creation * 1.25) + (cache_read * 0.1) + ((total_input - total_cached) * 1.0)
-            cost_savings_percent = ((cost_without_cache - cost_with_cache) / cost_without_cache) * 100 if cost_without_cache > 0 else 0
+        # Choose processing mode based on configuration with intelligent fallback
+        if self.use_batch_api and len(chunks) >= self.batch_threshold:
+            # Use batch API for large documents
+            logger.info(f"[BATCH] Using batch API for {len(chunks)} chunks (≥ {self.batch_threshold} threshold)")
+            return await self._process_batch(chunks, full_document, progress_callback)
         else:
-            cost_savings_percent = 0
+            # Use streaming for small documents or when batch API is disabled
+            if self.use_batch_api and len(chunks) < self.batch_threshold:
+                logger.info(f"[FALLBACK] Using streaming fallback: {len(chunks)} chunks < {self.batch_threshold} threshold")
+            else:
+                logger.info(f"[STREAMING] Using streaming mode for {len(chunks)} chunks")
+            return await self._process_streaming(chunks, full_document, progress_callback)
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get simple processing statistics"""
+        success_rate = (self.successful_requests / self.total_requests) * 100 if self.total_requests > 0 else 0
+        processing_mode = "batch" if self.use_batch_api else "streaming"
         
         return {
             "enabled": self.enabled,
             "model": self.model,
-            "daily_requests_used": self._daily_request_count,
-            "daily_requests_limit": self.max_daily_requests,
-            "last_reset_date": self._last_reset_date.isoformat(),
-            "max_tokens_per_document": self.max_tokens_per_doc,
-            "token_usage": self.token_counts.copy(),
-            "cache_metrics": {
-                "hit_rate": round(cache_hit_rate, 4),
-                "total_cached_tokens": total_cached,
-                "cache_reads": cache_read,
-                "cache_creations": cache_creation,
-                "estimated_cost_savings_percent": round(cost_savings_percent, 2)
-            }
+            "processing_mode": processing_mode,
+            "batch_threshold": self.batch_threshold if self.use_batch_api else None,
+            "total_requests": self.total_requests,
+            "successful_requests": self.successful_requests,
+            "success_rate_percent": round(success_rate, 1),
+            "max_tokens_per_document": self.max_tokens_per_doc
         }
