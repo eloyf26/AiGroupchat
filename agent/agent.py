@@ -68,8 +68,8 @@ class DocumentContextManager:
         self.backend_url = backend_url
         self.client = httpx.AsyncClient(timeout=10.0)  # Longer timeout for RAG
     
-    async def get_context(self, query: str, owner_id: str) -> Optional[str]:
-        """Get relevant document context for a query"""
+    async def get_context(self, query: str, owner_id: str, agent_id: Optional[str] = None) -> Optional[str]:
+        """Get relevant document context for a query, optionally filtered by agent"""
         try:
             # Validate inputs
             if not query or not isinstance(query, str):
@@ -78,13 +78,19 @@ class DocumentContextManager:
             if not owner_id or not isinstance(owner_id, str):
                 logger.warning(f"Invalid owner_id: {owner_id}")
                 return None
+            
+            request_data = {
+                "query": query,
+                "owner_id": owner_id
+            }
+            
+            # Add agent_id if provided for document filtering
+            if agent_id:
+                request_data["agent_id"] = agent_id
                 
             response = await self.client.post(
                 f"{self.backend_url}/api/documents/context",
-                json={
-                    "query": query,
-                    "owner_id": owner_id
-                }
+                json=request_data
             )
             logger.debug(f"Backend response status: {response.status_code}")
             if response.status_code == 200:
@@ -117,19 +123,20 @@ class DocumentContextManager:
 class RAGVoiceAgent(Agent):
     """Voice agent with RAG support using pipeline nodes"""
     
-    def __init__(self, instructions: str, context_manager: DocumentContextManager, owner_id: str, room_name: str, agent_name: str = "Agent", other_agents: List[str] = None):
+    def __init__(self, instructions: str, context_manager: DocumentContextManager, owner_id: str, room_name: str, agent_name: str = "Agent", agent_id: Optional[str] = None, other_agents: List[str] = None):
         super().__init__(instructions=instructions)
         self._context_manager = context_manager
         self._owner_id = owner_id
         self._room_name = room_name
         self._agent_name = agent_name
+        self._agent_id = agent_id  # Agent ID for document filtering
         self._other_agents = other_agents or []
         self._rag_enabled = True
         self._last_agent_spoke_time = 0
         self._last_response = None  # Track last generated response
         self._last_user_message = None  # Track last user message to avoid duplicates
         self._last_user_message_time = 0
-        logger.info(f"RAGVoiceAgent initialized with owner_id: {owner_id}, room: {room_name}")
+        logger.info(f"RAGVoiceAgent initialized with owner_id: {owner_id}, room: {room_name}, agent_id: {agent_id}")
     
     async def on_user_turn_completed(self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage) -> None:
         """Called when user completes a turn - inject conversation memory and RAG context"""
@@ -185,8 +192,8 @@ class RAGVoiceAgent(Agent):
             
             # Retrieve relevant context if RAG is enabled
             if self._rag_enabled and self._context_manager and self._owner_id:
-                logger.info(f"Retrieving context for query: '{user_message}' with owner_id: '{self._owner_id}'")
-                context = await self._context_manager.get_context(user_message, self._owner_id)
+                logger.info(f"Retrieving context for query: '{user_message}' with owner_id: '{self._owner_id}', agent_id: '{self._agent_id}'")
+                context = await self._context_manager.get_context(user_message, self._owner_id, self._agent_id)
             
             if context:
                 # Add context as a system message to inform the LLM
@@ -404,9 +411,42 @@ async def entrypoint(ctx: agents.JobContext):
         except json.JSONDecodeError:
             logger.warning("Failed to parse participant metadata")
     
-    # Get the template for selected agent type
-    template = AGENT_TEMPLATES.get(agent_type, AGENT_TEMPLATES["study_partner"])
-    logger.info(f"Using agent template: {agent_type} ({template['name']})")
+    # Check if agent_type is a UUID (custom agent) or a template name
+    import re
+    uuid_pattern = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
+    
+    if uuid_pattern.match(agent_type):
+        # This is a custom agent ID, fetch details from backend
+        logger.info(f"Fetching custom agent details for ID: {agent_type}")
+        
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(f"http://localhost:8000/api/agents/{agent_type}")
+                if response.status_code == 200:
+                    agent_data = response.json()
+                    template = {
+                        "name": agent_data["name"],
+                        "instructions": agent_data["instructions"],
+                        "voice_id": agent_data["voice_id"],
+                        "greeting": agent_data["greeting"]
+                    }
+                    # Store the actual agent ID for document filtering
+                    agent_id = agent_type
+                    logger.info(f"Using custom agent: {template['name']}")
+                else:
+                    # Fallback to default if custom agent not found
+                    logger.warning(f"Custom agent {agent_type} not found, using default")
+                    template = AGENT_TEMPLATES["study_partner"]
+                    agent_id = None
+            except Exception as e:
+                logger.error(f"Error fetching custom agent: {e}")
+                template = AGENT_TEMPLATES["study_partner"]
+                agent_id = None
+    else:
+        # This is a template name, use built-in template
+        template = AGENT_TEMPLATES.get(agent_type, AGENT_TEMPLATES["study_partner"])
+        logger.info(f"Using agent template: {agent_type} ({template['name']})")
+        # For template agents, agent_id remains None (no document filtering)
     
     # Get other agent names from room metadata
     other_agents = []
@@ -433,6 +473,7 @@ async def entrypoint(ctx: agents.JobContext):
         owner_id=owner_id,
         room_name=ctx.room.name,
         agent_name=agent_name,
+        agent_id=agent_id,  # Pass agent_id for document filtering
         other_agents=other_agents
     )
     

@@ -37,7 +37,7 @@ export function DocumentManager({ participantName }: DocumentManagerProps) {
 
   useEffect(() => {
     fetchDocuments();
-  }, [participantName]);
+  }, [participantName]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -109,7 +109,7 @@ export function DocumentManager({ participantName }: DocumentManagerProps) {
     <div style={{ marginTop: "2rem", padding: "1rem", border: "1px solid #e0e0e0", borderRadius: "8px" }}>
       <h3>📚 Your Documents</h3>
       <p style={{ color: "#666", fontSize: "0.9rem", marginBottom: "1rem" }}>
-        Upload documents to enhance AI agent responses with your content
+        Upload documents to enhance AI agent responses with your content. Use the "Add Knowledge" button on custom agents to link documents.
       </p>
 
       {/* Upload Section */}

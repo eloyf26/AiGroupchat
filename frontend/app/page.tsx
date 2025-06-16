@@ -3,10 +3,16 @@
 import { useEffect, useState } from "react";
 import { VoiceRoom } from "./components/VoiceRoom";
 import { DocumentManager } from "./components/DocumentManager";
+import { AgentManager } from "./components/AgentManager";
 
-interface AgentTemplate {
+interface Agent {
+  id: string;
   name: string;
-  description: string;
+  instructions: string;
+  voice_id: string;
+  greeting: string;
+  is_default: boolean;
+  document_count: number;
 }
 
 export default function Home() {
@@ -14,10 +20,7 @@ export default function Home() {
   const [roomName, setRoomName] = useState("test-room");
   const [participantName, setParticipantName] = useState("");
   const [isInRoom, setIsInRoom] = useState(false);
-  const [enableAIAgent, setEnableAIAgent] = useState(true);
-  const [selectedAgentType, setSelectedAgentType] = useState("study_partner");
-  const [selectedAgentType2, setSelectedAgentType2] = useState("");  // Empty = single agent
-  const [agentTemplates, setAgentTemplates] = useState<Record<string, AgentTemplate>>({});
+  const [selectedAgents, setSelectedAgents] = useState<Agent[]>([]);
 
   useEffect(() => {
     // Check backend health
@@ -25,12 +28,6 @@ export default function Home() {
       .then((res) => res.json())
       .then(() => setBackendStatus("Connected"))
       .catch(() => setBackendStatus("Not connected"));
-    
-    // Fetch agent templates
-    fetch("http://localhost:8000/api/agent-templates")
-      .then((res) => res.json())
-      .then((templates) => setAgentTemplates(templates))
-      .catch((err) => console.error("Failed to fetch agent templates:", err));
   }, []);
 
   const handleJoinRoom = () => {
@@ -93,83 +90,25 @@ export default function Home() {
               />
             </div>
             
-            {/* Stage 5: Agent Selection */}
-            <div style={{ marginBottom: "1rem" }}>
-              <label style={{ display: "block", marginBottom: "0.5rem" }}>
-                <input
-                  type="checkbox"
-                  checked={enableAIAgent}
-                  onChange={(e) => setEnableAIAgent(e.target.checked)}
-                  style={{ marginRight: "0.5rem" }}
-                />
-                Enable AI Agent
-              </label>
-            </div>
-            
-            {enableAIAgent && (
-              <>
-                <div style={{ marginBottom: "1rem" }}>
-                  <label htmlFor="agentType" style={{ display: "block", marginBottom: "0.5rem" }}>
-                    Agent 1:
-                  </label>
-                  <select
-                    id="agentType"
-                    value={selectedAgentType}
-                    onChange={(e) => setSelectedAgentType(e.target.value)}
-                    style={{
-                      padding: "0.5rem",
-                      width: "100%",
-                      maxWidth: "300px",
-                      border: "1px solid #ccc",
-                      borderRadius: "4px",
-                    }}
-                  >
-                    {Object.entries(agentTemplates).map(([key, template]) => (
-                      <option key={key} value={key}>
-                        {template.name} - {template.description}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                
-                <div style={{ marginBottom: "1rem" }}>
-                  <label htmlFor="agentType2" style={{ display: "block", marginBottom: "0.5rem" }}>
-                    Agent 2 (optional):
-                  </label>
-                  <select
-                    id="agentType2"
-                    value={selectedAgentType2}
-                    onChange={(e) => setSelectedAgentType2(e.target.value)}
-                    style={{
-                      padding: "0.5rem",
-                      width: "100%",
-                      maxWidth: "300px",
-                      border: "1px solid #ccc",
-                      borderRadius: "4px",
-                    }}
-                  >
-                    <option value="">None - Single Agent</option>
-                    {Object.entries(agentTemplates).map(([key, template]) => (
-                      <option key={key} value={key} disabled={key === selectedAgentType}>
-                        {template.name} - {template.description}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </>
+            {/* Agent Selection */}
+            {participantName.trim() && (
+              <AgentManager 
+                ownerName={participantName} 
+                onAgentsSelected={setSelectedAgents}
+              />
             )}
             
             <button
               onClick={handleJoinRoom}
-              disabled={!participantName.trim() || backendStatus !== "Connected"}
+              disabled={!participantName.trim() || backendStatus !== "Connected" || selectedAgents.length === 0}
               style={{
                 padding: "0.5rem 1rem",
                 backgroundColor: "#0070f3",
                 color: "white",
                 border: "none",
                 borderRadius: "4px",
-                cursor: participantName.trim() && backendStatus === "Connected" ? "pointer" : "not-allowed",
-                opacity: participantName.trim() && backendStatus === "Connected" ? 1 : 0.5,
+                cursor: participantName.trim() && backendStatus === "Connected" && selectedAgents.length > 0 ? "pointer" : "not-allowed",
+                opacity: participantName.trim() && backendStatus === "Connected" && selectedAgents.length > 0 ? 1 : 0.5,
               }}
             >
               Join Room
@@ -188,9 +127,9 @@ export default function Home() {
           <VoiceRoom
             roomName={roomName}
             participantName={participantName}
-            enableAIAgent={enableAIAgent}
-            agentType={selectedAgentType}
-            agentTypes={selectedAgentType2 ? [selectedAgentType, selectedAgentType2] : undefined}
+            enableAIAgent={selectedAgents.length > 0}
+            agentType={selectedAgents[0]?.id || ""}
+            agentTypes={selectedAgents.map(a => a.id)}
             onLeave={handleLeaveRoom}
           />
           <button

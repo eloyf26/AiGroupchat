@@ -166,3 +166,247 @@ a.secondary {
     filter: invert();
   }
 }
+
+/* Agent Manager Styles */
+.agentManager {
+  margin: 2rem 0;
+}
+
+.agentGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.agentCard {
+  padding: 1rem;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
+}
+
+.agentCard:hover {
+  border-color: #0070f3;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.agentCard.selected {
+  border-color: #0070f3;
+  background-color: #f0f8ff;
+}
+
+.agentCard h4 {
+  margin: 0 0 0.5rem 0;
+}
+
+.agentType {
+  font-size: 0.85rem;
+  color: #666;
+  margin: 0.25rem 0;
+}
+
+.agentDocs {
+  font-size: 0.85rem;
+  color: #666;
+  margin: 0.25rem 0;
+}
+
+.deleteBtn {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+  background: #dc3545;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.createCard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-style: dashed;
+}
+
+.createIcon {
+  font-size: 2rem;
+  color: #0070f3;
+}
+
+.modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modalContent {
+  background: white;
+  padding: 2rem;
+  border-radius: 8px;
+  width: 90%;
+  max-width: 500px;
+}
+
+.modalContent h3 {
+  margin-top: 0;
+}
+
+.input, .textarea, .select {
+  width: 100%;
+  padding: 0.5rem;
+  margin-bottom: 1rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-family: inherit;
+}
+
+.textarea {
+  resize: vertical;
+}
+
+.modalButtons {
+  display: flex;
+  gap: 1rem;
+  justify-content: flex-end;
+}
+
+.modalButtons button {
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.modalButtons button:first-child {
+  background: #6c757d;
+  color: white;
+}
+
+.modalButtons button:last-child {
+  background: #0070f3;
+  color: white;
+}
+
+.modalButtons button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Knowledge Management Styles */
+.agentActions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.knowledgeBtn {
+  padding: 0.25rem 0.5rem;
+  background-color: #28a745;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  flex: 1;
+}
+
+.knowledgeBtn:hover {
+  background-color: #218838;
+}
+
+.knowledgePanel {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: white;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 1rem;
+  margin-top: 0.5rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 10;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.knowledgePanel h5 {
+  margin: 0 0 1rem 0;
+  font-size: 0.9rem;
+  font-weight: bold;
+}
+
+.knowledgePanel h6 {
+  margin: 0.5rem 0 0.25rem 0;
+  font-size: 0.8rem;
+  color: #666;
+}
+
+.linkedDocs, .availableDocs {
+  margin-bottom: 1rem;
+}
+
+.linkedDoc, .availableDoc {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.25rem 0;
+  font-size: 0.8rem;
+}
+
+.linkedDoc span, .availableDoc span {
+  flex: 1;
+  margin-right: 0.5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.linkBtn {
+  padding: 0.2rem 0.4rem;
+  background-color: #0070f3;
+  color: white;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 0.7rem;
+}
+
+.linkBtn:hover {
+  background-color: #0056b3;
+}
+
+.unlinkBtn {
+  padding: 0.2rem 0.4rem;
+  background-color: #dc3545;
+  color: white;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 0.7rem;
+}
+
+.unlinkBtn:hover {
+  background-color: #c82333;
+}
+
+.noDocuments {
+  color: #999;
+  font-style: italic;
+  font-size: 0.8rem;
+  margin: 0;
+}

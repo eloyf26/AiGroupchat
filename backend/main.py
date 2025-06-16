@@ -9,6 +9,7 @@ import logging
 import tempfile
 from dotenv import load_dotenv
 from typing import Optional, List
+from uuid import UUID
 from agent_templates import get_agent_template, get_available_templates
 from document_store import DocumentStore
 
@@ -331,6 +332,7 @@ class SearchRequest(BaseModel):
     owner_id: str
     max_results: int = 5
     similarity_threshold: float = 0.3
+    agent_id: Optional[str] = None
 
 
 @app.post("/api/documents/search")
@@ -341,7 +343,8 @@ async def search_documents(request: SearchRequest):
             query=request.query,
             owner_id=request.owner_id,
             match_count=request.max_results,
-            match_threshold=request.similarity_threshold
+            match_threshold=request.similarity_threshold,
+            agent_id=request.agent_id
         )
         
         return {
@@ -366,7 +369,8 @@ async def get_document_context(request: SearchRequest):
         context = await document_store.get_context_for_query(
             query=request.query,
             owner_id=request.owner_id,
-            max_tokens=1500
+            max_tokens=1500,
+            agent_id=request.agent_id
         )
         
         return {
@@ -390,6 +394,195 @@ class ConversationMessage(BaseModel):
     message: str
     owner_id: Optional[str] = None  # Added for RLS
     metadata: Optional[dict] = {}
+
+
+class CreateAgentRequest(BaseModel):
+    name: str
+    instructions: str
+    voice_id: str = "nPczCjzI2devNBz1zQrb"  # Default to Brian
+    greeting: str
+
+
+class AgentResponse(BaseModel):
+    id: str
+    owner_id: str
+    name: str
+    instructions: str
+    voice_id: str
+    greeting: str
+    is_default: bool
+    created_at: str
+    document_count: Optional[int] = 0
+
+
+class LinkDocumentsRequest(BaseModel):
+    document_ids: List[str]
+
+
+# Agent Management Endpoints
+
+@app.post("/api/agents", response_model=AgentResponse)
+async def create_agent(agent: CreateAgentRequest, owner_id: str):
+    """Create a custom agent for a user"""
+    try:
+        result = document_store.supabase.table("user_agents").insert({
+            "owner_id": owner_id,
+            "name": agent.name,
+            "instructions": agent.instructions,
+            "voice_id": agent.voice_id,
+            "greeting": agent.greeting,
+            "is_default": False
+        }).execute()
+        
+        return AgentResponse(**result.data[0], document_count=0)
+    except Exception as e:
+        logger.error(f"Failed to create agent: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/agents", response_model=List[AgentResponse])
+async def list_agents(owner_id: str):
+    """List all agents for a user (custom + defaults)"""
+    try:
+        # Get user's custom agents and default agents
+        result = document_store.supabase.table("user_agents") \
+            .select("*") \
+            .or_(f"owner_id.eq.{owner_id},owner_id.eq._default") \
+            .execute()
+        
+        agents = []
+        for agent_data in result.data:
+            # Count linked documents
+            doc_count = document_store.supabase.table("agent_documents") \
+                .select("document_id", count="exact") \
+                .eq("agent_id", agent_data["id"]) \
+                .execute()
+            
+            agents.append(AgentResponse(
+                **agent_data,
+                document_count=doc_count.count
+            ))
+        
+        return agents
+    except Exception as e:
+        logger.error(f"Failed to list agents: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/agents/{agent_id}", response_model=AgentResponse)
+async def get_agent(agent_id: str):
+    """Get a specific agent by ID"""
+    try:
+        result = document_store.supabase.table("user_agents") \
+            .select("*") \
+            .eq("id", agent_id) \
+            .single() \
+            .execute()
+        
+        # Count linked documents
+        doc_count = document_store.supabase.table("agent_documents") \
+            .select("document_id", count="exact") \
+            .eq("agent_id", agent_id) \
+            .execute()
+        
+        return AgentResponse(**result.data, document_count=doc_count.count)
+    except Exception as e:
+        logger.error(f"Failed to get agent: {str(e)}")
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+
+@app.delete("/api/agents/{agent_id}")
+async def delete_agent(agent_id: str, owner_id: str):
+    """Delete a custom agent (cannot delete default agents)"""
+    try:
+        # Check if agent exists and belongs to user
+        check = document_store.supabase.table("user_agents") \
+            .select("*") \
+            .eq("id", agent_id) \
+            .eq("owner_id", owner_id) \
+            .eq("is_default", False) \
+            .single() \
+            .execute()
+        
+        if not check.data:
+            raise HTTPException(status_code=403, detail="Cannot delete this agent")
+        
+        # Delete agent (cascades to agent_documents)
+        document_store.supabase.table("user_agents") \
+            .delete() \
+            .eq("id", agent_id) \
+            .execute()
+        
+        return {"message": "Agent deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete agent: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/agents/{agent_id}/documents")
+async def link_documents_to_agent(agent_id: str, request: LinkDocumentsRequest):
+    """Link documents to an agent"""
+    try:
+        # Prepare batch insert
+        links = [
+            {"agent_id": agent_id, "document_id": doc_id}
+            for doc_id in request.document_ids
+        ]
+        
+        # Insert links (ignore conflicts)
+        if links:
+            document_store.supabase.table("agent_documents") \
+                .upsert(links, on_conflict="agent_id,document_id") \
+                .execute()
+        
+        return {"message": f"Linked {len(links)} documents to agent"}
+    except Exception as e:
+        logger.error(f"Failed to link documents: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/agents/{agent_id}/documents/{document_id}")
+async def unlink_document_from_agent(agent_id: str, document_id: str):
+    """Unlink a document from an agent"""
+    try:
+        document_store.supabase.table("agent_documents") \
+            .delete() \
+            .eq("agent_id", agent_id) \
+            .eq("document_id", document_id) \
+            .execute()
+        
+        return {"message": "Document unlinked successfully"}
+    except Exception as e:
+        logger.error(f"Failed to unlink document: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/agents/{agent_id}/documents")
+async def list_agent_documents(agent_id: str):
+    """List all documents linked to an agent"""
+    try:
+        # Get linked document IDs
+        links = document_store.supabase.table("agent_documents") \
+            .select("document_id") \
+            .eq("agent_id", agent_id) \
+            .execute()
+        
+        if not links.data:
+            return []
+        
+        # Get document details
+        doc_ids = [link["document_id"] for link in links.data]
+        documents = document_store.supabase.table("documents") \
+            .select("*") \
+            .in_("id", doc_ids) \
+            .execute()
+        
+        return documents.data
+    except Exception as e:
+        logger.error(f"Failed to list agent documents: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/conversation/message")

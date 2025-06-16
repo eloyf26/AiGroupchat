@@ -233,7 +233,8 @@ class DocumentStore:
         query: str, 
         owner_id: str, 
         match_count: int = 5,
-        match_threshold: float = 0.3
+        match_threshold: float = 0.3,
+        agent_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Search for relevant document sections using configured search method
@@ -249,11 +250,11 @@ class DocumentStore:
         """
         # Choose search method based on configuration
         if self.use_hybrid_search:
-            logger.info(f"🔍 [HYBRID] Query: '{query[:40]}...'")
-            results = await self._hybrid_search(query, owner_id, match_count, match_threshold)
+            logger.info(f"🔍 [HYBRID] Query: '{query[:40]}...' Agent: {agent_id}")
+            results = await self._hybrid_search(query, owner_id, match_count, match_threshold, agent_id)
         else:
-            logger.info(f"🔍 [SEMANTIC] Query: '{query[:40]}...'")
-            results = await self._semantic_search(query, owner_id, match_count, match_threshold)
+            logger.info(f"🔍 [SEMANTIC] Query: '{query[:40]}...' Agent: {agent_id}")
+            results = await self._semantic_search(query, owner_id, match_count, match_threshold, agent_id)
         
         # Apply reranking if enabled and model is loaded
         if self.use_rerank and len(results) > 1 and self._reranker is not None:
@@ -268,7 +269,8 @@ class DocumentStore:
         query: str, 
         owner_id: str, 
         match_count: int = 5,
-        match_threshold: float = 0.3
+        match_threshold: float = 0.3,
+        agent_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Original semantic search implementation"""
         # Generate query embedding
@@ -285,9 +287,27 @@ class DocumentStore:
             }
         ).execute()
         
+        # If agent_id is provided, get list of documents linked to this agent
+        linked_doc_ids = None
+        if agent_id:
+            try:
+                link_response = self.supabase.table("agent_documents") \
+                    .select("document_id") \
+                    .eq("agent_id", agent_id) \
+                    .execute()
+                linked_doc_ids = {link["document_id"] for link in link_response.data}
+                logger.info(f"Agent {agent_id} has access to {len(linked_doc_ids)} documents")
+            except Exception as e:
+                logger.error(f"Failed to get agent documents: {e}")
+        
         # Format results using cached metadata
         results = []
         for row in response.data:
+            # Skip if agent filtering is enabled and document not linked
+            if agent_id and linked_doc_ids is not None:
+                if row["document_id"] not in linked_doc_ids:
+                    continue
+            
             # Try cached metadata first
             doc_info = self._get_cached_document_metadata(row["document_id"])
             if not doc_info:
@@ -315,17 +335,18 @@ class DocumentStore:
         query: str, 
         owner_id: str, 
         match_count: int = 5,
-        match_threshold: float = 0.3
+        match_threshold: float = 0.3,
+        agent_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Concurrent hybrid search combining semantic and BM25 results"""
         # Removed verbose logging
         
         # Create concurrent tasks
         semantic_task = asyncio.create_task(
-            self._semantic_search(query, owner_id, match_count * 2, match_threshold)
+            self._semantic_search(query, owner_id, match_count * 2, match_threshold, agent_id)
         )
         bm25_task = asyncio.create_task(
-            self._bm25_search_async(query, owner_id, match_count * 2)
+            self._bm25_search_async(query, owner_id, match_count * 2, agent_id)
         )
         
         # Wait for both searches to complete
@@ -381,7 +402,7 @@ class DocumentStore:
             print(f"Error deleting document: {e}")
             return False
     
-    async def get_context_for_query(self, query: str, owner_id: str, max_tokens: int = 1500) -> str:
+    async def get_context_for_query(self, query: str, owner_id: str, max_tokens: int = 1500, agent_id: Optional[str] = None) -> str:
         """
         Get relevant context for a query to use in LLM prompts
         
@@ -394,7 +415,7 @@ class DocumentStore:
             Formatted context string
         """
         # Search for relevant documents
-        results = await self.search_documents(query, owner_id, match_count=5)
+        results = await self.search_documents(query, owner_id, match_count=5, agent_id=agent_id)
         
         if not results:
             return ""
@@ -532,11 +553,24 @@ class DocumentStore:
         except Exception as e:
             logger.error(f"Error building BM25 index: {e}")
     
-    def _bm25_search(self, query: str, owner_id: str, max_results: int = 5) -> List[Dict[str, Any]]:
+    def _bm25_search(self, query: str, owner_id: str, max_results: int = 5, agent_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Perform BM25 keyword search"""
         bm25_data = self._get_bm25_index(owner_id)
         if not bm25_data:
             return []
+        
+        # If agent_id is provided, get list of documents linked to this agent
+        linked_doc_ids = None
+        if agent_id:
+            try:
+                link_response = self.supabase.table("agent_documents") \
+                    .select("document_id") \
+                    .eq("agent_id", agent_id) \
+                    .execute()
+                linked_doc_ids = {link["document_id"] for link in link_response.data}
+                logger.info(f"[BM25] Agent {agent_id} has access to {len(linked_doc_ids)} documents")
+            except Exception as e:
+                logger.error(f"Failed to get agent documents for BM25: {e}")
         
         # Tokenize query
         query_tokens = query.lower().split()
@@ -549,20 +583,31 @@ class DocumentStore:
         if not isinstance(scores, np.ndarray):
             scores = np.array(scores)
         
-        # Get top results
-        top_indices = sorted(range(len(scores)), key=lambda i: float(scores[i]), reverse=True)[:max_results]
+        # Get top results (get more than needed to account for filtering)
+        multiplier = 3 if agent_id else 1
+        top_indices = sorted(range(len(scores)), key=lambda i: float(scores[i]), reverse=True)[:max_results * multiplier]
         
         results = []
         for idx in top_indices:
             score_value = float(scores[idx])  # Convert to float to avoid numpy array issues
             if score_value > 0:  # Only include relevant results
                 doc = bm25_data['docs'][idx]
+                
+                # Skip if agent filtering is enabled and document not linked
+                if agent_id and linked_doc_ids is not None:
+                    if doc['document_id'] not in linked_doc_ids:
+                        continue
+                
                 results.append({
                     'content': doc['content'],
                     'score': score_value,
                     'document_id': doc['document_id'],
                     'section_id': doc['id']
                 })
+                
+                # Stop if we have enough results
+                if len(results) >= max_results:
+                    break
         
         # Removed verbose logging
         return results
@@ -673,10 +718,10 @@ class DocumentStore:
             logger.error(f"💥 [RERANKER] Failed to load: {e}")
             raise
     
-    async def _bm25_search_async(self, query: str, owner_id: str, max_results: int = 5):
+    async def _bm25_search_async(self, query: str, owner_id: str, max_results: int = 5, agent_id: Optional[str] = None):
         """Async wrapper for BM25 search"""
         def bm25_search():
-            return self._bm25_search(query, owner_id, max_results)
+            return self._bm25_search(query, owner_id, max_results, agent_id)
         
         return await asyncio.get_event_loop().run_in_executor(
             self._executor, bm25_search

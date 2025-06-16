@@ -137,7 +137,7 @@ function RoomContent() {
                 displayName = "AI Agent";
               }
               agentType = metadata.agent_type || "";
-            } catch (e) {
+            } catch {
               // If metadata parsing fails, use identity
               if (participant.identity.startsWith("agent-")) {
                 displayName = "AI Agent";
