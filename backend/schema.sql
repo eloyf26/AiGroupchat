@@ -32,6 +32,10 @@ create index if not exists document_sections_embedding_idx on document_sections 
 create index if not exists document_sections_contextualized_idx on document_sections(is_contextualized);
 create index if not exists document_sections_contextual_metadata_idx on document_sections using gin (contextual_metadata);
 
+-- Create indexes for conversation queries
+create index if not exists conversation_messages_room_idx on conversation_messages(room_name);
+create index if not exists conversation_messages_created_idx on conversation_messages(created_at);
+
 -- Create contextual processing statistics table
 create table if not exists contextual_processing_stats (
   id uuid default gen_random_uuid() primary key,
@@ -43,6 +47,17 @@ create table if not exists contextual_processing_stats (
   total_tokens_used integer default 0,
   processing_time_seconds float default 0,
   cost_estimate_usd decimal(10,4) default 0,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+-- Create conversation_messages table for multi-agent memory
+create table if not exists conversation_messages (
+  id uuid default gen_random_uuid() primary key,
+  room_name text not null,
+  participant_name text not null,
+  participant_type text not null check (participant_type in ('human', 'agent')),
+  message text not null,
+  metadata jsonb default '{}',
   created_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
 
@@ -298,3 +313,16 @@ begin
     and cps.created_at >= (now() - interval '1 day' * days_back);
 end;
 $$;
+
+-- Function to clean up old conversations (optional)
+create or replace function cleanup_old_conversations()
+returns void as $$
+begin
+  delete from conversation_messages 
+  where created_at < now() - interval '7 days';
+end;
+$$ language plpgsql;
+
+-- Grant permissions for conversation_messages
+grant all on conversation_messages to authenticated;
+grant all on conversation_messages to service_role;

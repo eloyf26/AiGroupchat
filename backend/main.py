@@ -78,6 +78,7 @@ class TokenRequest(BaseModel):
     participant_name: str
     enable_ai_agent: bool = True  # Enable AI agent by default for Stage 3
     agent_type: str = "study_partner"  # Default agent type for Stage 5
+    agent_types: Optional[List[str]] = None  # Support multiple agents
 
 
 @app.get("/health")
@@ -121,15 +122,21 @@ async def generate_token(request: TokenRequest):
             # Add room metadata with agent type
             grants.room_record = True
             
+            # Determine agent types to spawn
+            agent_types_to_spawn = request.agent_types if request.agent_types else [request.agent_type]
+            # Limit to 2 agents max
+            agent_types_to_spawn = agent_types_to_spawn[:2]
+            
             # Add metadata to participant to indicate agent should join
             # Include the selected agent type in metadata
             metadata = {
                 "wants_agent": True,
-                "agent_type": request.agent_type
+                "agent_type": request.agent_type,
+                "agent_types": agent_types_to_spawn
             }
             token.with_metadata(json.dumps(metadata))
             
-            # Create room with metadata to pass agent type and owner_id
+            # Create room with metadata to pass agent types and owner_id
             try:
                 livekit_api = api.LiveKitAPI(
                     url=os.getenv("LIVEKIT_URL", "ws://localhost:7880"),
@@ -137,7 +144,7 @@ async def generate_token(request: TokenRequest):
                     api_secret=api_secret
                 )
                 room_metadata = {
-                    "agent_type": request.agent_type,
+                    "agent_types": agent_types_to_spawn,
                     "owner_id": request.participant_name
                 }
                 # Create or update room with metadata
@@ -374,3 +381,70 @@ async def get_document_context(request: SearchRequest):
             status_code=500,
             detail=f"Failed to get document context: {str(e)}"
         )
+
+
+class ConversationMessage(BaseModel):
+    room_name: str
+    participant_name: str
+    participant_type: str  # 'human' or 'agent'
+    message: str
+    owner_id: Optional[str] = None  # Added for RLS
+    metadata: Optional[dict] = {}
+
+
+@app.post("/api/conversation/message")
+async def add_conversation_message(message: ConversationMessage):
+    """Add a message to conversation history"""
+    try:
+        # Determine owner_id if not provided
+        owner_id = message.owner_id
+        if not owner_id:
+            # For human messages, use participant name as owner
+            if message.participant_type == "human":
+                owner_id = message.participant_name
+            else:
+                # For agent messages, try to get owner from room metadata
+                # This is a simple approach - in production you might want to cache this
+                result = document_store.supabase.table("conversation_messages") \
+                    .select("owner_id") \
+                    .eq("room_name", message.room_name) \
+                    .eq("participant_type", "human") \
+                    .limit(1) \
+                    .execute()
+                
+                if result.data:
+                    owner_id = result.data[0]["owner_id"]
+                else:
+                    # Fallback: extract from room metadata or use room name
+                    owner_id = message.room_name.split("_")[0] if "_" in message.room_name else message.room_name
+        
+        result = document_store.supabase.table("conversation_messages").insert({
+            "room_name": message.room_name,
+            "participant_name": message.participant_name,
+            "participant_type": message.participant_type,
+            "message": message.message,
+            "owner_id": owner_id,
+            "metadata": message.metadata
+        }).execute()
+        
+        return {"status": "success", "id": result.data[0]["id"]}
+    except Exception as e:
+        logger.error(f"Failed to add conversation message: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/conversation/{room_name}")
+async def get_conversation_history(room_name: str, limit: int = 20):
+    """Get conversation history for a room"""
+    try:
+        result = document_store.supabase.table("conversation_messages") \
+            .select("*") \
+            .eq("room_name", room_name) \
+            .order("created_at", desc=False) \
+            .limit(limit) \
+            .execute()
+        
+        return {"messages": result.data}
+    except Exception as e:
+        logger.error(f"Failed to get conversation history: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

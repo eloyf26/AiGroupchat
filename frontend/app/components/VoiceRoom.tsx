@@ -5,22 +5,20 @@ import {
   LiveKitRoom,
   RoomAudioRenderer,
   ControlBar,
-  ParticipantTile,
-  useTracks,
   useParticipants,
 } from "@livekit/components-react";
 import "@livekit/components-styles";
-import { Track } from "livekit-client";
 
 interface VoiceRoomProps {
   roomName: string;
   participantName: string;
   enableAIAgent?: boolean;
   agentType?: string;
+  agentTypes?: string[];
   onLeave: () => void;
 }
 
-export function VoiceRoom({ roomName, participantName, enableAIAgent = true, agentType = "study_partner", onLeave }: VoiceRoomProps) {
+export function VoiceRoom({ roomName, participantName, enableAIAgent = true, agentType = "study_partner", agentTypes, onLeave }: VoiceRoomProps) {
   const [token, setToken] = useState<string>("");
   const [serverUrl, setServerUrl] = useState<string>("");
   const [isConnecting, setIsConnecting] = useState(false);
@@ -41,6 +39,7 @@ export function VoiceRoom({ roomName, participantName, enableAIAgent = true, age
           participant_name: participantName,
           enable_ai_agent: enableAIAgent,
           agent_type: agentType,
+          agent_types: agentTypes,
         }),
       });
 
@@ -51,7 +50,7 @@ export function VoiceRoom({ roomName, participantName, enableAIAgent = true, age
       const data = await response.json();
       setToken(data.token);
       setServerUrl(data.url);
-    } catch (err) {
+    } catch {
       setError("Failed to connect to room");
       setIsConnecting(false);
     }
@@ -119,7 +118,36 @@ function RoomContent() {
         }}
       >
         {participants.map((participant) => {
-          const isAgent = participant.identity.startsWith("AI_");
+          // Check if participant is an agent by identity pattern or metadata
+          const isAgent = participant.identity.startsWith("AI_") || 
+                         participant.identity.startsWith("agent-") ||
+                         participant.metadata?.includes("agent_type");
+          
+          // Extract agent name from metadata if available
+          let displayName = participant.identity;
+          let agentType = "";
+          
+          if (isAgent && participant.metadata) {
+            try {
+              const metadata = JSON.parse(participant.metadata);
+              if (metadata.agent_name) {
+                displayName = metadata.agent_name;
+              } else if (participant.identity.startsWith("agent-")) {
+                // Default to showing as "AI Agent" for LiveKit agents
+                displayName = "AI Agent";
+              }
+              agentType = metadata.agent_type || "";
+            } catch (e) {
+              // If metadata parsing fails, use identity
+              if (participant.identity.startsWith("agent-")) {
+                displayName = "AI Agent";
+              }
+            }
+          } else {
+            // For human participants, clean up the display name
+            displayName = displayName.replace("AI_", "");
+          }
+          
           return (
             <div
               key={participant.identity}
@@ -132,10 +160,10 @@ function RoomContent() {
             >
               <div style={{ fontWeight: "bold", marginBottom: "0.5rem" }}>
                 {isAgent ? "🤖 " : "👤 "}
-                {participant.identity.replace("AI_", "")}
+                {displayName}
               </div>
               <div style={{ fontSize: "0.875rem", color: "#666" }}>
-                {isAgent ? "AI Assistant" : "Human Participant"}
+                {isAgent ? `AI Assistant${agentType ? ` (${agentType})` : ""}` : "Human Participant"}
               </div>
               <div style={{ fontSize: "0.75rem", marginTop: "0.5rem" }}>
                 {participant.isSpeaking ? "🔊 Speaking" : "🔇 Silent"}

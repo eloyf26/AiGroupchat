@@ -3,7 +3,7 @@
 AI-powered group voice chat application with RAG capabilities, built with Next.js, FastAPI, LiveKit, and Supabase.
 
 ## 🎯 Current Status
-**Stage 8 completed** - The application now supports hybrid search and reranking for enhanced RAG accuracy!
+**All MVP stages completed + Multi-Agent Support!** - The application now supports conversation memory and multiple AI agents in the same room!
 
 ## ✅ Completed Features
 
@@ -13,13 +13,16 @@ AI-powered group voice chat application with RAG capabilities, built with Next.j
 - **LiveKit Integration**: Real-time voice communication
 - **AI Agents**: 3 configurable personalities (Alex, Sophie, Marcus)
 - **ElevenLabs Voice**: High-quality, low-latency speech synthesis
+- **Multi-Agent Support**: Run 1 or 2 AI agents simultaneously
+- **Conversation Memory**: Persistent chat history stored in Supabase
 
-### RAG Capabilities (Stages 6-8)
+### RAG Capabilities (Stages 6-10)
 - **Document Upload**: PDF and text file processing
 - **Vector Database**: Supabase with pgvector for semantic search
-- **Smart Chunking**: 512-token chunks with overlap
+- **Smart Chunking**: 800-token chunks with 10% overlap (Anthropic recommendation)
 - **Hybrid Search**: BM25 keyword search + vector similarity with Reciprocal Rank Fusion
 - **Reranking**: CrossEncoder reranking for improved result quality
+- **Contextual Retrieval**: Anthropic Claude-powered context enhancement with 90%+ cost reduction
 - **Context Injection**: AI agents reference uploaded documents during conversations
 - **Real-time Retrieval**: Document context fetched and injected seamlessly
 
@@ -44,25 +47,41 @@ AI-powered group voice chat application with RAG capabilities, built with Next.j
    # Agent  
    cp agent/.env.example agent/.env      # Add your API keys
    ```
+   
+2. **Database Migration** (for improved conversation memory):
+   ```bash
+   # If upgrading an existing installation, run:
+   psql $DATABASE_URL < backend/migrate_conversation_security.sql
+   
+   # For cleanup job setup, see backend/CONVERSATION_CLEANUP.md
+   ```
 
-2. **Start Services**:
+2. **Setup Database** (first time only):
+   ```bash
+   # Run migration in Supabase SQL editor
+   cd backend && cat migrate_conversation.sql
+   ```
+
+3. **Start Services**:
    ```bash
    # Terminal 1: Backend
    cd backend && ./run.sh
    
-   # Terminal 2: Agent
-   cd agent && ./run.sh
+   # Terminal 2: Agent(s)
+   cd agent && ./run.sh        # Single agent
+   # OR
+   cd agent && ./run-multi.sh 2  # Two agents
    
    # Terminal 3: Frontend
    cd frontend && npm run dev
    ```
 
-3. **Test the Application**:
+4. **Test the Application**:
    - Open http://localhost:3000
-   - Select an AI agent (Alex, Sophie, or Marcus)
+   - Select 1 or 2 AI agents (Alex, Sophie, or Marcus)
    - Join a voice room
    - Upload documents via the backend API
-   - Have conversations where agents reference your documents!
+   - Have conversations where agents reference your documents and remember context!
 
 ## 🧪 Testing
 
@@ -76,6 +95,7 @@ Run automated tests for each stage:
 ./test-stage6.sh  # Vector database
 ./test-stage7.sh  # RAG implementation
 ./test-stage8.sh  # Hybrid search & reranking
+./test-conversation-memory.sh  # Test new conversation and multi-agent features
 ```
 
 ## 🤖 AI Agent Personalities
@@ -140,29 +160,60 @@ export USE_RERANK=true          # Enable reranking for better results
 
 ## 🚀 Current Capabilities
 
-✅ **7 out of 10 stages complete**
+✅ **All MVP stages complete + Advanced Features**
 - Real-time voice communication
 - 3 AI agent personalities  
+- Multi-agent conversations (1-2 agents per room)
+- Persistent conversation memory
 - Document upload and processing
 - Semantic search and retrieval
-- Context-aware AI responses
+- Hybrid search with BM25 + vector similarity
+- Reranking with CrossEncoder models
+- Contextual retrieval with Anthropic Claude
+- Context-aware AI responses with memory
 
-## 🔮 Planned Enhancements (Stages 8-10)
+## 🎭 Multi-Agent Conversations
 
-### Stage 8: Hybrid Search
+**New Feature**: Have conversations with multiple AI agents simultaneously!
+
+### How it Works:
+1. Select up to 2 agents in the UI
+2. Agents are aware of each other and reference each other's contributions
+3. Simple turn-taking prevents agents from talking over each other
+4. All conversations are stored in Supabase for context
+
+### Example Combinations:
+- **Study Session**: Alex (Study Partner) + Sophie (Socratic Tutor)
+- **Debate Club**: Sophie (Socratic Tutor) + Marcus (Debate Partner)
+- **Learning Lab**: Alex (Study Partner) + Marcus (Debate Partner)
+
+### Running Multiple Agents:
+```bash
+# Single agent (default)
+cd agent && ./run.sh
+
+# Two agents
+cd agent && ./run-multi.sh 2
+```
+
+## 🎉 Completed Advanced RAG Features
+
+### Stage 8: Hybrid Search ✅
 - BM25 keyword search + vector similarity
 - Reciprocal Rank Fusion (RRF) 
 - Configurable search weights
+- Performance-optimized with caching
 
-### Stage 9: Advanced Processing
-- Semantic chunking strategies
-- Reranking models integration
-- Dynamic chunk sizing
+### Stage 9: Advanced Processing ✅
+- Intelligent chunking strategies
+- CrossEncoder reranking models
+- Dynamic chunk sizing based on content
 
-### Stage 10: Contextual Retrieval  
-- LLM-generated context headers
+### Stage 10: Contextual Retrieval ✅
+- Anthropic Claude-powered context generation
+- Prompt caching with 90%+ cost reduction
+- Batch API for large documents
 - Enhanced metadata enrichment
-- Document-level summaries
 
 ---
 

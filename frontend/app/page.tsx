@@ -16,6 +16,7 @@ export default function Home() {
   const [isInRoom, setIsInRoom] = useState(false);
   const [enableAIAgent, setEnableAIAgent] = useState(true);
   const [selectedAgentType, setSelectedAgentType] = useState("study_partner");
+  const [selectedAgentType2, setSelectedAgentType2] = useState("");  // Empty = single agent
   const [agentTemplates, setAgentTemplates] = useState<Record<string, AgentTemplate>>({});
 
   useEffect(() => {
@@ -106,29 +107,56 @@ export default function Home() {
             </div>
             
             {enableAIAgent && (
-              <div style={{ marginBottom: "1rem" }}>
-                <label htmlFor="agentType" style={{ display: "block", marginBottom: "0.5rem" }}>
-                  Select AI Agent:
-                </label>
-                <select
-                  id="agentType"
-                  value={selectedAgentType}
-                  onChange={(e) => setSelectedAgentType(e.target.value)}
-                  style={{
-                    padding: "0.5rem",
-                    width: "100%",
-                    maxWidth: "300px",
-                    border: "1px solid #ccc",
-                    borderRadius: "4px",
-                  }}
-                >
-                  {Object.entries(agentTemplates).map(([key, template]) => (
-                    <option key={key} value={key}>
-                      {template.name} - {template.description}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              <>
+                <div style={{ marginBottom: "1rem" }}>
+                  <label htmlFor="agentType" style={{ display: "block", marginBottom: "0.5rem" }}>
+                    Agent 1:
+                  </label>
+                  <select
+                    id="agentType"
+                    value={selectedAgentType}
+                    onChange={(e) => setSelectedAgentType(e.target.value)}
+                    style={{
+                      padding: "0.5rem",
+                      width: "100%",
+                      maxWidth: "300px",
+                      border: "1px solid #ccc",
+                      borderRadius: "4px",
+                    }}
+                  >
+                    {Object.entries(agentTemplates).map(([key, template]) => (
+                      <option key={key} value={key}>
+                        {template.name} - {template.description}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                
+                <div style={{ marginBottom: "1rem" }}>
+                  <label htmlFor="agentType2" style={{ display: "block", marginBottom: "0.5rem" }}>
+                    Agent 2 (optional):
+                  </label>
+                  <select
+                    id="agentType2"
+                    value={selectedAgentType2}
+                    onChange={(e) => setSelectedAgentType2(e.target.value)}
+                    style={{
+                      padding: "0.5rem",
+                      width: "100%",
+                      maxWidth: "300px",
+                      border: "1px solid #ccc",
+                      borderRadius: "4px",
+                    }}
+                  >
+                    <option value="">None - Single Agent</option>
+                    {Object.entries(agentTemplates).map(([key, template]) => (
+                      <option key={key} value={key} disabled={key === selectedAgentType}>
+                        {template.name} - {template.description}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </>
             )}
             
             <button
@@ -162,6 +190,7 @@ export default function Home() {
             participantName={participantName}
             enableAIAgent={enableAIAgent}
             agentType={selectedAgentType}
+            agentTypes={selectedAgentType2 ? [selectedAgentType, selectedAgentType2] : undefined}
             onLeave={handleLeaveRoom}
           />
           <button

@@ -42,9 +42,9 @@ ai-group-call-mvp/
 - **Stage 5**: ✅ Agent configuration UI (completed)
 - **Stage 6**: ✅ Supabase Vector Database Setup (completed)
 - **Stage 7**: ✅ Basic RAG with Document Upload (completed)
-- **Stage 8**: ⏳ Hybrid Search Implementation (planned)
-- **Stage 9**: ⏳ Advanced Chunking & Reranking (planned)
-- **Stage 10**: ⏳ Contextual Retrieval (planned)
+- **Stage 8**: ✅ Hybrid Search Implementation (completed)
+- **Stage 9**: ✅ Advanced Chunking & Reranking (completed)
+- **Stage 10**: ✅ Contextual Retrieval (completed)
 
 ### Key Components
 
@@ -74,9 +74,10 @@ ai-group-call-mvp/
 - **OpenAI Embeddings**: text-embedding-3-small for vector generation
 - **pypdf2**: PDF document parsing
 
-### Planned Advanced RAG Technologies (Stages 8-10)
+### Implemented Advanced RAG Technologies (Stages 8-10)
 - **rank-bm25**: BM25 keyword search implementation
-- **sentence-transformers**: Semantic chunking and reranking models
+- **sentence-transformers**: CrossEncoder reranking models
+- **anthropic**: Claude API for contextual retrieval
 
 ## Development Commands
 
@@ -105,13 +106,16 @@ ai-group-call-mvp/
 - Stage 3 test: `./test-stage3.sh`
 - Stage 4 test: `./test-stage4.sh`
 - Stage 5 test: `./test-stage5.sh`
+- Stage 6 test: `./test-stage6.sh`
+- Stage 7 test: `./test-stage7.sh`
+- Stage 8 test: `./test-stage8.sh`
 
 ## Implementation Details
 
 ### Backend API Endpoints
 - `GET /health` - Health check endpoint
 - `POST /api/token` - Generate LiveKit access token
-  - Request body: `{ "room_name": string, "participant_name": string, "enable_ai_agent": boolean, "agent_type": string }`
+  - Request body: `{ "room_name": string, "participant_name": string, "enable_ai_agent": boolean, "agent_type": string, "agent_types": string[] }`
   - Response: `{ "token": string, "url": string, "ai_agent_enabled": boolean, "agent_type": string }`
 - `GET /api/agent-templates` - Get available agent templates
 - `GET /api/agent-templates/{template_type}` - Get specific agent template details
@@ -121,6 +125,10 @@ ai-group-call-mvp/
   - Response: `{ "context": string, "has_context": boolean }`
 - `POST /api/documents/upload` - Upload and process documents for RAG
 - `POST /api/documents/search` - Search documents using semantic similarity
+- `POST /api/conversation/message` - Store a conversation message
+  - Request body: `{ "room_name": string, "participant_name": string, "participant_type": string, "message": string }`
+- `GET /api/conversation/{room_name}` - Get conversation history
+  - Query params: `limit` (default: 20)
 
 ### Frontend Components
 - `page.tsx` - Main page with room join form and agent selection
@@ -128,6 +136,10 @@ ai-group-call-mvp/
   - Handles room connection and disconnection
   - Manages audio track publishing/subscribing
   - Displays participant list with AI/Human indicators
+- `DocumentManager.tsx` - Document upload and management component
+  - File upload interface for PDF and TXT files
+  - Document list display with metadata
+  - Real-time document fetching for users
 
 ### Agent Configuration
 Three hardcoded agent templates:
@@ -234,6 +246,14 @@ When implementing features, always refer to the provided documentation for best 
 - `httpx==0.27.2` - HTTP client for RAG context retrieval
 
 ## Recent Changes
+
+- **Multi-Agent Support (2025)**:
+  - **Conversation Memory**: All messages stored in Supabase with room context
+  - **Multi-Agent Rooms**: Support for 1-2 AI agents per conversation
+  - **Agent Awareness**: Agents know about each other and reference contributions
+  - **Simple Turn-Taking**: 2-second delay prevents agent overlap
+  - **Frontend Updates**: Dual agent selection with dropdown UI
+  - **Minimal Implementation**: ~140 lines of code total
 - **Performance Optimizations (2025)**:
   - **Cache-Aware Rate Limiting**: Upgraded to Claude 3.5 Sonnet where cached tokens don't count against ITPM limits
   - **Batch API Integration**: Automatic batch processing for documents ≥10 chunks (50% cost reduction)
@@ -288,17 +308,17 @@ When implementing features, always refer to the provided documentation for best 
 
 ## Future RAG Enhancements (Stages 8-10)
 
-### Stage 8: Hybrid Search Implementation (Planned)
-- Add BM25 index using rank-bm25 library for keyword search
-- Implement Reciprocal Rank Fusion (RRF) to combine vector and keyword results
-- Create hybrid search endpoint that merges both search types
-- Add search configuration options (weights for semantic vs keyword)
+### Stage 8: Hybrid Search Implementation (✅ Completed)
+- ✅ Added BM25 index using rank-bm25 library for keyword search
+- ✅ Implemented Reciprocal Rank Fusion (RRF) to combine vector and keyword results
+- ✅ Created hybrid search endpoint that merges both search types
+- ✅ Added search configuration options via environment variables
 
-### Stage 9: Advanced Chunking & Reranking (Planned)
-- Implement semantic chunking using sentence-transformers
-- Add proposition-based chunking for factual content
-- Integrate reranking model (ms-marco-MiniLM or BGE reranker)
-- Implement dynamic chunk size selection based on content type
+### Stage 9: Advanced Chunking & Reranking (✅ Completed)
+- ✅ Implemented intelligent chunking with dynamic strategies
+- ✅ Added content-aware chunking (800 tokens with 10% overlap)
+- ✅ Integrated CrossEncoder reranking (ms-marco-MiniLM-L-6-v2)
+- ✅ Implemented dynamic chunk size selection based on content type
 
 ### Stage 10: Contextual Retrieval (✅ Completed - Official Implementation)
 - ✅ Implemented official Anthropic Contextual Retrieval using exact specifications
